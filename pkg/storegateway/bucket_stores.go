@@ -3,8 +3,10 @@ package storegateway
 import (
 	"context"
 	"fmt"
+	"github.com/weaveworks/common/httpgrpc"
 	"io/ioutil"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +71,19 @@ type BucketStores struct {
 	syncLastSuccess   prometheus.Gauge
 	tenantsDiscovered prometheus.Gauge
 	tenantsSynced     prometheus.Gauge
+}
+
+type ChunkLimiter struct {
+	limiter* store.Limiter
+}
+
+func (c *ChunkLimiter) Reserve(num uint64) error {
+	err := c.limiter.Reserve(num)
+	if err != nil {
+		return httpgrpc.Errorf(http.StatusUnprocessableEntity, err.Error())
+	}
+
+	return nil
 }
 
 // NewBucketStores makes a new BucketStores.
@@ -577,6 +592,8 @@ func newChunksLimiterFactory(limits *validation.Overrides, userID string) store.
 	return func(failedCounter prometheus.Counter) store.ChunksLimiter {
 		// Since limit overrides could be live reloaded, we have to get the current user's limit
 		// each time a new limiter is instantiated.
-		return store.NewLimiter(uint64(limits.MaxChunksPerQuery(userID)), failedCounter)
+		return &ChunkLimiter{
+			limiter: store.NewLimiter(uint64(limits.MaxChunksPerQuery(userID)), failedCounter),
+		}
 	}
 }

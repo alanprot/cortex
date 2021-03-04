@@ -996,6 +996,9 @@ func (s *BucketStore) Series(req *storepb.SeriesRequest, srv storepb.Store_Serie
 			err = g.Wait()
 		})
 		if err != nil {
+			if _, ok := status.FromError(errors.Cause(err)); ok {
+				return err
+			}
 			return status.Error(codes.Aborted, err.Error())
 		}
 		stats.blocksQueried = len(res)
