@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"fmt"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 )
@@ -78,6 +79,7 @@ func (a *Alerts) gc() {
 	for fp, alert := range a.c {
 		if alert.Resolved() {
 			delete(a.c, fp)
+			fmt.Println("Ehhhh Alan, GCing an alert")
 			resolved = append(resolved, alert)
 		}
 	}

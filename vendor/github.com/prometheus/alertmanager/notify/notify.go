@@ -475,7 +475,8 @@ func NewWaitStage(wait func() time.Duration) *WaitStage {
 }
 
 // Exec implements the Stage interface.
-func (ws *WaitStage) Exec(ctx context.Context, _ log.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
+func (ws *WaitStage) Exec(ctx context.Context, l log.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
+	level.Info(l).Log("msg", "WAITTING ALAN WAITING", "time", ws.wait().String())
 	select {
 	case <-time.After(ws.wait()):
 	case <-ctx.Done():
@@ -551,14 +552,16 @@ func hashAlert(a *types.Alert) uint64 {
 	return hash
 }
 
-func (n *DedupStage) needsUpdate(entry *nflogpb.Entry, firing, resolved map[uint64]struct{}, repeat time.Duration) bool {
+func (n *DedupStage) needsUpdate(entry *nflogpb.Entry, firing, resolved map[uint64]struct{}, repeat time.Duration, l log.Logger) bool {
 	// If we haven't notified about the alert group before, notify right away
 	// unless we only have resolved alerts.
 	if entry == nil {
+		level.Info(l).Log("msg", "ENTRY IS NULL ALAN")
 		return len(firing) > 0
 	}
 
 	if !entry.IsFiringSubset(firing) {
+		level.Info(l).Log("msg", "IsFiringSubset IS NOT TRUE ALAN")
 		return true
 	}
 
@@ -570,19 +573,23 @@ func (n *DedupStage) needsUpdate(entry *nflogpb.Entry, firing, resolved map[uint
 		// alert, it means that some alerts have been fired and resolved during the
 		// last interval. In this case, there is no need to notify the receiver
 		// since it doesn't know about them.
+		level.Info(l).Log("msg", "OMG FiringAlerts IS CRAZY ALAN", "FiringAlerts", len(entry.FiringAlerts))
 		return len(entry.FiringAlerts) > 0
 	}
 
 	if n.rs.SendResolved() && !entry.IsResolvedSubset(resolved) {
+		level.Info(l).Log("msg", "IDK ANYMORE ALAN")
 		return true
 	}
 
 	// Nothing changed, only notify if the repeat interval has passed.
-	return entry.Timestamp.Before(n.now().Add(-repeat))
+	repeatExpired := entry.Timestamp.Before(n.now().Add(-repeat))
+	level.Info(l).Log("msg", "ehhh repeat ALAN", "repeatExpired", repeatExpired)
+	return repeatExpired
 }
 
 // Exec implements the Stage interface.
-func (n *DedupStage) Exec(ctx context.Context, _ log.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
+func (n *DedupStage) Exec(ctx context.Context, l log.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
 	gkey, ok := GroupKey(ctx)
 	if !ok {
 		return ctx, nil, errors.New("group key missing")
@@ -627,9 +634,11 @@ func (n *DedupStage) Exec(ctx context.Context, _ log.Logger, alerts ...*types.Al
 		return ctx, nil, errors.Errorf("unexpected entry result size %d", len(entries))
 	}
 
-	if n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval) {
+	if n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval, l) {
+		level.Info(l).Log("msg", "It needs update ALAN")
 		return ctx, alerts, nil
 	}
+	level.Info(l).Log("msg", "It does not needs update ALAN")
 	return ctx, nil, nil
 }
 

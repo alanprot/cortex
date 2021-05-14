@@ -57,6 +57,7 @@ func NewAlerts(ctx context.Context, m types.Marker, intervalGC time.Duration, l 
 		logger:    log.With(l, "component", "provider"),
 	}
 	a.alerts.SetGCCallback(func(alerts []*types.Alert) {
+		level.Info(a.logger).Log("msg", "Gcing callback", "len", len(alerts))
 		for _, alert := range alerts {
 			// As we don't persist alerts, we no longer consider them after
 			// they are resolved. Alerts waiting for resolved notifications are
@@ -158,6 +159,7 @@ func (a *Alerts) Put(alerts ...*types.Alert) error {
 			// Merge alerts if there is an overlap in activity range.
 			if (alert.EndsAt.After(old.StartsAt) && alert.EndsAt.Before(old.EndsAt)) ||
 				(alert.StartsAt.After(old.StartsAt) && alert.StartsAt.Before(old.EndsAt)) {
+				level.Info(a.logger).Log("msg", "Merging Alerts Alan")
 				alert = old.Merge(alert)
 			}
 		}

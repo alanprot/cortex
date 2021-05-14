@@ -276,6 +276,7 @@ type notifyFunc func(context.Context, ...*types.Alert) bool
 // processAlert determines in which aggregation group the alert falls
 // and inserts it.
 func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
+	level.Info(d.logger).Log("msg", "Processing Alerts Alan")
 	groupLabels := getGroupLabels(alert, route)
 
 	fp := groupLabels.Fingerprint()
@@ -292,6 +293,7 @@ func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
 	// If the group does not exist, create it.
 	ag, ok := group[fp]
 	if !ok {
+		level.Info(d.logger).Log("msg", "CreatingGroup Alan")
 		ag = newAggrGroup(d.ctx, groupLabels, route, d.timeout, d.logger)
 		group[fp] = ag
 		d.metrics.aggrGroups.Inc()
@@ -413,6 +415,7 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 			ag.mtx.Unlock()
 
 			ag.flush(func(alerts ...*types.Alert) bool {
+				level.Error(ag.logger).Log("msg", "Alan FLushing")
 				return nf(ctx, alerts...)
 			})
 

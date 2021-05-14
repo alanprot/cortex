@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io/ioutil"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1003,6 +1004,9 @@ func (am *MultitenantAlertmanager) HandleRequest(ctx context.Context, in *httpgr
 // serveRequest serves the Alertmanager's web UI and API.
 func (am *MultitenantAlertmanager) serveRequest(w http.ResponseWriter, req *http.Request) {
 	userID, err := tenant.TenantID(req.Context())
+	requestDump, _ := httputil.DumpRequest(req, true)
+	level.Info(am.logger).Log("msg", "Receiving Request Alan", "user", userID, "req", string(requestDump))
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
