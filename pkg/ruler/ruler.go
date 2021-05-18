@@ -363,6 +363,7 @@ func SendAlerts(n sender, externalURL string) promRules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*promRules.Alert) {
 		var res []*notifier.Alert
 
+		fmt.Println("Sending Alert up and running")
 		for _, alert := range alerts {
 			a := &notifier.Alert{
 				StartsAt:     alert.FiredAt,
