@@ -96,7 +96,7 @@ func (cfg *RingConfig) ToRingConfig() ring.Config {
 	rc.SubringCacheDisabled = true
 
 	// Each rule group is loaded to *exactly* one ruler.
-	rc.ReplicationFactor = 1
+	rc.ReplicationFactor = 2
 
 	return rc
 }
