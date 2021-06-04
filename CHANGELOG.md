@@ -45,7 +45,7 @@
 * [BUGFIX] Fixed cache fetch error on Redis Cluster. #4056
 * [BUGFIX] Ingester: fix issue where runtime limits erroneously override default limits. #4246
 * [BUGFIX] Ruler: fix startup in single-binary mode when the new `ruler_storage` is used. #4252
-
+* [CHANGE] Querier / ruler: Migrate the -querier.max-fetched-chunks-per-query limit to the new QueryLimiter to limit the number of chunks returned as a sum of chunks returned from the ingester and storage gateway.
 ## Blocksconvert
 
 * [ENHANCEMENT] Scanner: add support for DynamoDB (v9 schema only). #3828
