@@ -38,6 +38,10 @@ type PusherAppender struct {
 	labels          []labels.Labels
 	samples         []cortexpb.Sample
 	userID          string
+	instanceID      string
+	replicaLabel    string
+	clusterLabel    string
+	acceptHaSamples bool
 	evaluationDelay time.Duration
 }
 
@@ -72,6 +76,20 @@ func (a *PusherAppender) Commit() error {
 
 	// Since a.pusher is distributor, client.ReuseSlice will be called in a.pusher.Push.
 	// We shouldn't call client.ReuseSlice here.
+	for i, _ := range a.labels {
+		if a.acceptHaSamples {
+			a.labels[i] = append(a.labels[i],
+				labels.Label{
+					Name:  a.replicaLabel,
+					Value: a.instanceID,
+				},
+				labels.Label{
+					Name:  a.clusterLabel,
+					Value: "rulerCluster",
+				},
+			)
+		}
+	}
 	_, err := a.pusher.Push(user.InjectOrgID(a.ctx, a.userID), cortexpb.ToWriteRequest(a.labels, a.samples, nil, cortexpb.RULE))
 
 	if err != nil {
@@ -96,16 +114,18 @@ func (a *PusherAppender) Rollback() error {
 type PusherAppendable struct {
 	pusher      Pusher
 	userID      string
+	instanceID  string
 	rulesLimits RulesLimits
 
 	totalWrites  prometheus.Counter
 	failedWrites prometheus.Counter
 }
 
-func NewPusherAppendable(pusher Pusher, userID string, limits RulesLimits, totalWrites, failedWrites prometheus.Counter) *PusherAppendable {
+func NewPusherAppendable(pusher Pusher, instanceID string, userID string, limits RulesLimits, totalWrites, failedWrites prometheus.Counter) *PusherAppendable {
 	return &PusherAppendable{
 		pusher:       pusher,
 		userID:       userID,
+		instanceID:   instanceID,
 		rulesLimits:  limits,
 		totalWrites:  totalWrites,
 		failedWrites: failedWrites,
@@ -121,6 +141,10 @@ func (t *PusherAppendable) Appender(ctx context.Context) storage.Appender {
 		ctx:             ctx,
 		pusher:          t.pusher,
 		userID:          t.userID,
+		instanceID:      t.instanceID,
+		replicaLabel:    t.rulesLimits.HAReplicaLabel(t.userID),
+		clusterLabel:    t.rulesLimits.HAClusterLabel(t.userID),
+		acceptHaSamples: t.rulesLimits.AcceptHASamples(t.userID),
 		evaluationDelay: t.rulesLimits.EvaluationDelay(t.userID),
 	}
 }
@@ -131,6 +155,9 @@ type RulesLimits interface {
 	RulerTenantShardSize(userID string) int
 	RulerMaxRuleGroupsPerTenant(userID string) int
 	RulerMaxRulesPerRuleGroup(userID string) int
+	AcceptHASamples(userID string) bool
+	HAClusterLabel(userID string) string
+	HAReplicaLabel(userID string) string
 }
 
 // EngineQueryFunc returns a new query function using the rules.EngineQueryFunc function
@@ -260,7 +287,7 @@ func DefaultTenantManagerFactory(cfg Config, p Pusher, q storage.Queryable, engi
 		}
 
 		return rules.NewManager(&rules.ManagerOptions{
-			Appendable:      NewPusherAppendable(p, userID, overrides, totalWrites, failedWrites),
+			Appendable:      NewPusherAppendable(p, cfg.Ring.InstanceID, userID, overrides, totalWrites, failedWrites),
 			Queryable:       q,
 			QueryFunc:       RecordAndReportRuleQueryMetrics(MetricsQueryFunc(EngineQueryFunc(engine, q, overrides, userID), totalQueries, failedQueries), queryTime, logger),
 			Context:         user.InjectOrgID(ctx, userID),

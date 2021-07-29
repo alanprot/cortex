@@ -75,6 +75,9 @@ type ruleLimits struct {
 	tenantShard          int
 	maxRulesPerRuleGroup int
 	maxRuleGroups        int
+	haReplicaLabel       string
+	haClusterLabel       string
+	acceptHASamples      bool
 }
 
 func (r ruleLimits) EvaluationDelay(_ string) time.Duration {
@@ -91,6 +94,18 @@ func (r ruleLimits) RulerMaxRuleGroupsPerTenant(_ string) int {
 
 func (r ruleLimits) RulerMaxRulesPerRuleGroup(_ string) int {
 	return r.maxRulesPerRuleGroup
+}
+
+func (r ruleLimits) HAReplicaLabel(_ string) string {
+	return r.haReplicaLabel
+}
+
+func (r ruleLimits) HAClusterLabel(_ string) string {
+	return r.haClusterLabel
+}
+
+func (r ruleLimits) AcceptHASamples(_ string) bool {
+	return r.acceptHASamples
 }
 
 func testSetup(t *testing.T, cfg Config) (*promql.Engine, storage.QueryableFunc, Pusher, log.Logger, RulesLimits, func()) {
@@ -653,7 +668,8 @@ func TestSharding(t *testing.T) {
 						KVStore: kv.Config{
 							Mock: kvStore,
 						},
-						HeartbeatTimeout: 1 * time.Minute,
+						HeartbeatTimeout:  1 * time.Minute,
+						ReplicationFactor: 1,
 					},
 					FlushCheckPeriod: 0,
 					EnabledTenants:   tc.enabledUsers,
