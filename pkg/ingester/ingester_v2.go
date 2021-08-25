@@ -828,6 +828,9 @@ func (i *Ingester) v2Push(ctx context.Context, req *cortexpb.WriteRequest) (*cor
 				continue
 
 			case storage.ErrDuplicateSampleForTimestamp:
+				if req.Source  == cortexpb.RULE {
+					continue
+				}
 				newValueForTimestampCount++
 				updateFirstPartial(func() error { return wrappedTSDBIngestErr(err, model.Time(s.TimestampMs), ts.Labels) })
 				continue

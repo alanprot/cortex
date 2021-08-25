@@ -29,9 +29,10 @@ var RingOp = ring.NewOp([]ring.InstanceState{ring.ACTIVE}, func(s ring.InstanceS
 // is used to strip down the config to the minimum, and avoid confusion
 // to the user.
 type RingConfig struct {
-	KVStore          kv.Config     `yaml:"kvstore"`
-	HeartbeatPeriod  time.Duration `yaml:"heartbeat_period"`
-	HeartbeatTimeout time.Duration `yaml:"heartbeat_timeout"`
+	KVStore           kv.Config     `yaml:"kvstore"`
+	HeartbeatPeriod   time.Duration `yaml:"heartbeat_period"`
+	HeartbeatTimeout  time.Duration `yaml:"heartbeat_timeout"`
+	ReplicationFactor int           `yaml:"replication_factor"`
 
 	// Instance details
 	InstanceID             string   `yaml:"instance_id" doc:"hidden"`
@@ -66,6 +67,7 @@ func (cfg *RingConfig) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.InstancePort, "ruler.ring.instance-port", 0, "Port to advertise in the ring (defaults to server.grpc-listen-port).")
 	f.StringVar(&cfg.InstanceID, "ruler.ring.instance-id", hostname, "Instance ID to register in the ring.")
 	f.IntVar(&cfg.NumTokens, "ruler.ring.num-tokens", 128, "Number of tokens for each ruler.")
+	f.IntVar(&cfg.ReplicationFactor, "ruler.replication-factor", 3, "The replication factor to use when sharding the rulers.")
 }
 
 // ToLifecyclerConfig returns a LifecyclerConfig based on the ruler
@@ -95,8 +97,7 @@ func (cfg *RingConfig) ToRingConfig() ring.Config {
 	rc.HeartbeatTimeout = cfg.HeartbeatTimeout
 	rc.SubringCacheDisabled = true
 
-	// Each rule group is loaded to *exactly* one ruler.
-	rc.ReplicationFactor = 1
+	rc.ReplicationFactor = cfg.ReplicationFactor
 
 	return rc
 }

@@ -653,7 +653,8 @@ func TestSharding(t *testing.T) {
 						KVStore: kv.Config{
 							Mock: kvStore,
 						},
-						HeartbeatTimeout: 1 * time.Minute,
+						HeartbeatTimeout:  1 * time.Minute,
+						ReplicationFactor: 1,
 					},
 					FlushCheckPeriod: 0,
 					EnabledTenants:   tc.enabledUsers,
