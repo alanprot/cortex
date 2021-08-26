@@ -135,8 +135,8 @@ func newManager(t *testing.T, cfg Config) (*DefaultMultiTenantManager, func()) {
 
 type mockRulerClientsPool struct {
 	services.Service
-	cfg              Config
-	expectedRulesMap map[string]*Ruler
+	cfg          Config
+	rulerAddrMap map[string]*Ruler
 }
 
 type mockRulerClient struct {
@@ -149,19 +149,19 @@ func (c *mockRulerClient) Rules(ctx context.Context, in *RulesRequest, _ ...grpc
 
 func (p *mockRulerClientsPool) GetClientFor(addr string) (RulerClient, error) {
 	return &mockRulerClient{
-		ruler: p.expectedRulesMap[addr],
+		ruler: p.rulerAddrMap[addr],
 	}, nil
 }
 
-func newMockClientsPool(cfg Config, logger log.Logger, reg prometheus.Registerer, expectedRulesMap map[string]*Ruler) *mockRulerClientsPool {
+func newMockClientsPool(cfg Config, logger log.Logger, reg prometheus.Registerer, rulerAddrMap map[string]*Ruler) *mockRulerClientsPool {
 	return &mockRulerClientsPool{
-		Service:          newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
-		cfg:              cfg,
-		expectedRulesMap: expectedRulesMap,
+		Service:      newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
+		cfg:          cfg,
+		rulerAddrMap: rulerAddrMap,
 	}
 }
 
-func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]*Ruler) (*Ruler, func()) {
+func buildRuler(t *testing.T, cfg Config, rulerAddrMap map[string]*Ruler) (*Ruler, func()) {
 	engine, noopQueryable, pusher, logger, overrides, cleanup := testSetup(t, cfg)
 	storage, err := NewLegacyRuleStore(cfg.StoreConfig, promRules.FileLoader{}, log.NewNopLogger())
 	require.NoError(t, err)
@@ -178,7 +178,7 @@ func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]*Ruler) (*
 		logger,
 		storage,
 		overrides,
-		newMockClientsPool(cfg, logger, reg, expectedRulesMap),
+		newMockClientsPool(cfg, logger, reg, rulerAddrMap),
 	)
 	require.NoError(t, err)
 	return ruler, cleanup
