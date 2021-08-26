@@ -805,8 +805,11 @@ func TestSharding(t *testing.T) {
 						require.Equal(t, count, len(rulesState))
 
 						mockPoolLClient := r1.clientsPool.(*mockRulerClientsPool)
-						// Right now we are calling all rulers in the ring regardless of the subring
-						require.Equal(t, int32(len(tc.expectedRules)), mockPoolLClient.numberOfCalls.Load())
+						if tc.shardingStrategy == util.ShardingStrategyShuffle && tc.shuffleShardSize > 0 {
+							require.Equal(t, int32(tc.shuffleShardSize), mockPoolLClient.numberOfCalls.Load())
+						} else {
+							require.Equal(t, int32(len(tc.expectedRules)), mockPoolLClient.numberOfCalls.Load())
+						}
 						mockPoolLClient.numberOfCalls.Store(0)
 					}
 				}

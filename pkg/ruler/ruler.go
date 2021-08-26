@@ -651,7 +651,7 @@ func (r *Ruler) GetRules(ctx context.Context) ([]*GroupStateDesc, error) {
 	}
 
 	if r.cfg.EnableSharding {
-		return r.getShardedRules(ctx)
+		return r.getShardedRules(userID, ctx)
 	}
 
 	return r.getLocalRules(userID)
@@ -744,8 +744,14 @@ func (r *Ruler) getLocalRules(userID string) ([]*GroupStateDesc, error) {
 	return groupDescs, nil
 }
 
-func (r *Ruler) getShardedRules(ctx context.Context) ([]*GroupStateDesc, error) {
-	rulers, err := r.ring.GetReplicationSetForOperation(RingOp)
+func (r *Ruler) getShardedRules(userId string, ctx context.Context) ([]*GroupStateDesc, error) {
+	ring := ring.ReadRing(r.ring)
+
+	if shardSize := r.limits.RulerTenantShardSize(userId); shardSize > 0 && r.cfg.ShardingStrategy == util.ShardingStrategyShuffle {
+		ring = r.ring.ShuffleShard(userId, shardSize)
+	}
+
+	rulers, err := ring.GetReplicationSetForOperation(RingOp)
 	if err != nil {
 		return nil, err
 	}
