@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/atomic"
+
 	"google.golang.org/grpc"
 
 	"github.com/go-kit/kit/log"
@@ -134,28 +136,32 @@ func newManager(t *testing.T, cfg Config) (*DefaultMultiTenantManager, func()) {
 }
 
 type mockRulerClientsPool struct {
-	services.Service
-	cfg          Config
-	rulerAddrMap map[string]*Ruler
+	ClientsPool
+	cfg           Config
+	rulerAddrMap  map[string]*Ruler
+	numberOfCalls atomic.Int32
 }
 
 type mockRulerClient struct {
-	ruler *Ruler
+	ruler         *Ruler
+	numberOfCalls *atomic.Int32
 }
 
 func (c *mockRulerClient) Rules(ctx context.Context, in *RulesRequest, _ ...grpc.CallOption) (*RulesResponse, error) {
+	c.numberOfCalls.Inc()
 	return c.ruler.Rules(ctx, in)
 }
 
 func (p *mockRulerClientsPool) GetClientFor(addr string) (RulerClient, error) {
 	return &mockRulerClient{
-		ruler: p.rulerAddrMap[addr],
+		ruler:         p.rulerAddrMap[addr],
+		numberOfCalls: &p.numberOfCalls,
 	}, nil
 }
 
 func newMockClientsPool(cfg Config, logger log.Logger, reg prometheus.Registerer, rulerAddrMap map[string]*Ruler) *mockRulerClientsPool {
 	return &mockRulerClientsPool{
-		Service:      newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
+		ClientsPool:  newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
 		cfg:          cfg,
 		rulerAddrMap: rulerAddrMap,
 	}
@@ -797,6 +803,11 @@ func TestSharding(t *testing.T) {
 					} else {
 						require.NoError(t, err)
 						require.Equal(t, count, len(rulesState))
+
+						mockPoolLClient := r1.clientsPool.(*mockRulerClientsPool)
+						// Right now we are calling all rulers in the ring regardless of the subring
+						require.Equal(t, int32(len(tc.expectedRules)), mockPoolLClient.numberOfCalls.Load())
+						mockPoolLClient.numberOfCalls.Store(0)
 					}
 				}
 			} else {
