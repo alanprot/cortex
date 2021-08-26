@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -135,43 +136,24 @@ func newManager(t *testing.T, cfg Config) (*DefaultMultiTenantManager, func()) {
 type mockRulerClientsPool struct {
 	services.Service
 	cfg              Config
-	expectedRulesMap map[string]map[string]rulespb.RuleGroupList
+	expectedRulesMap map[string]*Ruler
 }
 
 type mockRulerClient struct {
-	expectedRulesMapByUser map[string]rulespb.RuleGroupList
+	ruler *Ruler
 }
 
-func (c *mockRulerClient) Rules(ctx context.Context, in *RulesRequest, opts ...grpc.CallOption) (*RulesResponse, error) {
-	user, err := tenant.TenantID(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if userGroups, ok := c.expectedRulesMapByUser[user]; ok {
-		result := make([]*GroupStateDesc, 0, len(userGroups))
-
-		for _, group := range userGroups {
-			result = append(result, &GroupStateDesc{
-				Group: group,
-			})
-		}
-
-		return &RulesResponse{
-			Groups: result,
-		}, nil
-	}
-
-	return &RulesResponse{}, nil
+func (c *mockRulerClient) Rules(ctx context.Context, in *RulesRequest, _ ...grpc.CallOption) (*RulesResponse, error) {
+	return c.ruler.Rules(ctx, in)
 }
 
 func (p *mockRulerClientsPool) GetClientFor(addr string) (RulerClient, error) {
 	return &mockRulerClient{
-		expectedRulesMapByUser: p.expectedRulesMap[addr],
+		ruler: p.expectedRulesMap[addr],
 	}, nil
 }
 
-func newClientPool(cfg Config, logger log.Logger, reg prometheus.Registerer, expectedRulesMap map[string]map[string]rulespb.RuleGroupList) *mockRulerClientsPool {
+func newMockClientsPool(cfg Config, logger log.Logger, reg prometheus.Registerer, expectedRulesMap map[string]*Ruler) *mockRulerClientsPool {
 	return &mockRulerClientsPool{
 		Service:          newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
 		cfg:              cfg,
@@ -179,7 +161,7 @@ func newClientPool(cfg Config, logger log.Logger, reg prometheus.Registerer, exp
 	}
 }
 
-func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]map[string]rulespb.RuleGroupList) (*Ruler, func()) {
+func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]*Ruler) (*Ruler, func()) {
 	engine, noopQueryable, pusher, logger, overrides, cleanup := testSetup(t, cfg)
 	storage, err := NewLegacyRuleStore(cfg.StoreConfig, promRules.FileLoader{}, log.NewNopLogger())
 	require.NoError(t, err)
@@ -196,10 +178,9 @@ func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]map[string
 		logger,
 		storage,
 		overrides,
-		newClientPool(cfg, logger, reg, expectedRulesMap),
+		newMockClientsPool(cfg, logger, reg, expectedRulesMap),
 	)
 	require.NoError(t, err)
-
 	return ruler, cleanup
 }
 
@@ -304,10 +285,10 @@ func TestSharding(t *testing.T) {
 		user3 = "user3"
 	)
 
-	user1Group1 := &rulespb.RuleGroupDesc{User: user1, Namespace: "namespace", Name: "first"}
-	user1Group2 := &rulespb.RuleGroupDesc{User: user1, Namespace: "namespace", Name: "second"}
-	user2Group1 := &rulespb.RuleGroupDesc{User: user2, Namespace: "namespace", Name: "first"}
-	user3Group1 := &rulespb.RuleGroupDesc{User: user3, Namespace: "namespace", Name: "first"}
+	user1Group1 := &rulespb.RuleGroupDesc{User: user1, Namespace: "namespace", Name: "first", Interval: 10 * time.Second}
+	user1Group2 := &rulespb.RuleGroupDesc{User: user1, Namespace: "namespace", Name: "second", Interval: 10 * time.Second}
+	user2Group1 := &rulespb.RuleGroupDesc{User: user2, Namespace: "namespace", Name: "first", Interval: 10 * time.Second}
+	user3Group1 := &rulespb.RuleGroupDesc{User: user3, Namespace: "namespace", Name: "first", Interval: 10 * time.Second}
 
 	// Must be distinct for test to work.
 	user1Group1Token := tokenForGroup(user1Group1)
@@ -694,17 +675,17 @@ func TestSharding(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			kvStore := consul.NewInMemoryClient(ring.GetCodec())
-			expectedRulerMapByAddr := map[string]map[string]rulespb.RuleGroupList{}
+			expectedRulerMapByAddr := map[string]*Ruler{}
 
-			expectedRulerMapByAddr[ruler1Addr] = tc.expectedRules[ruler1]
-			expectedRulerMapByAddr[ruler2Addr] = tc.expectedRules[ruler2]
-			expectedRulerMapByAddr[ruler3Addr] = tc.expectedRules[ruler3]
-
+			externalURL, _ := url.Parse("https://test.com")
+			rulesDir, _ := ioutil.TempDir("/tmp", "ruler-tests")
 			setupRuler := func(id string, host string, port int, forceRing *ring.Ring) *Ruler {
 				cfg := Config{
 					StoreConfig:      RuleStoreConfig{mock: newMockRuleStore(allRules)},
 					EnableSharding:   tc.sharding,
 					ShardingStrategy: tc.shardingStrategy,
+					ExternalURL:      flagext.URLValue{URL: externalURL},
+					RulePath:         rulesDir,
 					Ring: RingConfig{
 						InstanceID:   id,
 						InstanceAddr: host,
@@ -720,6 +701,7 @@ func TestSharding(t *testing.T) {
 				}
 
 				r, cleanup := buildRuler(t, cfg, expectedRulerMapByAddr)
+				expectedRulerMapByAddr[fmt.Sprintf("%s:%d", host, port)] = r
 				r.limits = ruleLimits{evalDelay: 0, tenantShard: tc.shuffleShardSize}
 				t.Cleanup(cleanup)
 
@@ -761,6 +743,15 @@ func TestSharding(t *testing.T) {
 				// Wait a bit to make sure ruler's ring is updated.
 				time.Sleep(100 * time.Millisecond)
 			}
+
+			// Loading RulerGroups after the ring is configured
+			func(rulers ...*Ruler) {
+				for _, ruler := range rulers {
+					if ruler != nil {
+						ruler.syncRules(context.Background(), rulerSyncReasonInitial)
+					}
+				}
+			}(r1, r2, r3)
 
 			// Always add ruler1 to expected rulers, even if there is no ring (no sharding).
 			loadedRules1, err := r1.listRules(context.Background())
@@ -808,8 +799,19 @@ func TestSharding(t *testing.T) {
 						require.Equal(t, count, len(rulesState))
 					}
 				}
+			} else {
+				verifyLocal := func(expected map[string]rulespb.RuleGroupList, ruler *Ruler) {
+					for u, rules := range expected {
+						ctx := user.InjectOrgID(context.Background(), u)
+						rulesState, err := ruler.GetRules(ctx)
+						require.NoError(t, err)
+						require.Equal(t, len(rules), len(rulesState))
+					}
+				}
+				verifyLocal(expected[ruler1], r1)
+				verifyLocal(expected[ruler2], r2)
+				verifyLocal(expected[ruler3], r3)
 			}
-
 		})
 	}
 }

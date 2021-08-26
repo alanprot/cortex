@@ -19,7 +19,7 @@ import (
 // ClientsPool is the interface used to get the client from the pool for a specified address.
 type ClientsPool interface {
 	services.Service
-	// GetClientFor returns the alertmanager client for the given address.
+	// GetClientFor returns the ruler client for the given address.
 	GetClientFor(addr string) (RulerClient, error)
 }
 

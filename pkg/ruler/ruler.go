@@ -766,12 +766,12 @@ func (r *Ruler) getShardedRules(ctx context.Context) ([]*GroupStateDesc, error) 
 	err = concurrency.ForEach(ctx, jobs, len(jobs), func(ctx context.Context, job interface{}) error {
 		addr := job.(string)
 
-		grpcClient, err := r.clientsPool.GetClientFor(addr)
+		rulerClient, err := r.clientsPool.GetClientFor(addr)
 		if err != nil {
 			return errors.Wrapf(err, "unable to get client for ruler %s", addr)
 		}
 
-		newGrps, err := grpcClient.(RulerClient).Rules(ctx, &RulesRequest{})
+		newGrps, err := rulerClient.Rules(ctx, &RulesRequest{})
 		if err != nil {
 			return errors.Wrapf(err, "unable to retrieve rules from ruler %s", addr)
 		}
