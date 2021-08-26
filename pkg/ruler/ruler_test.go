@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/gorilla/mux"
@@ -130,7 +132,54 @@ func newManager(t *testing.T, cfg Config) (*DefaultMultiTenantManager, func()) {
 	return manager, cleanup
 }
 
-func newRuler(t *testing.T, cfg Config) (*Ruler, func()) {
+type mockRulerClientsPool struct {
+	services.Service
+	cfg              Config
+	expectedRulesMap map[string]map[string]rulespb.RuleGroupList
+}
+
+type mockRulerClient struct {
+	expectedRulesMapByUser map[string]rulespb.RuleGroupList
+}
+
+func (c *mockRulerClient) Rules(ctx context.Context, in *RulesRequest, opts ...grpc.CallOption) (*RulesResponse, error) {
+	user, err := tenant.TenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if userGroups, ok := c.expectedRulesMapByUser[user]; ok {
+		result := make([]*GroupStateDesc, 0, len(userGroups))
+
+		for _, group := range userGroups {
+			result = append(result, &GroupStateDesc{
+				Group: group,
+			})
+		}
+
+		return &RulesResponse{
+			Groups: result,
+		}, nil
+	}
+
+	return &RulesResponse{}, nil
+}
+
+func (p *mockRulerClientsPool) GetClientFor(addr string) (RulerClient, error) {
+	return &mockRulerClient{
+		expectedRulesMapByUser: p.expectedRulesMap[addr],
+	}, nil
+}
+
+func newClientPool(cfg Config, logger log.Logger, reg prometheus.Registerer, expectedRulesMap map[string]map[string]rulespb.RuleGroupList) *mockRulerClientsPool {
+	return &mockRulerClientsPool{
+		Service:          newRulerClientPool(cfg.ClientTLSConfig, logger, reg),
+		cfg:              cfg,
+		expectedRulesMap: expectedRulesMap,
+	}
+}
+
+func buildRuler(t *testing.T, cfg Config, expectedRulesMap map[string]map[string]rulespb.RuleGroupList) (*Ruler, func()) {
 	engine, noopQueryable, pusher, logger, overrides, cleanup := testSetup(t, cfg)
 	storage, err := NewLegacyRuleStore(cfg.StoreConfig, promRules.FileLoader{}, log.NewNopLogger())
 	require.NoError(t, err)
@@ -140,13 +189,14 @@ func newRuler(t *testing.T, cfg Config) (*Ruler, func()) {
 	manager, err := NewDefaultMultiTenantManager(cfg, managerFactory, reg, log.NewNopLogger())
 	require.NoError(t, err)
 
-	ruler, err := NewRuler(
+	ruler, err := newRuler(
 		cfg,
 		manager,
 		reg,
 		logger,
 		storage,
 		overrides,
+		newClientPool(cfg, logger, reg, expectedRulesMap),
 	)
 	require.NoError(t, err)
 
@@ -154,7 +204,7 @@ func newRuler(t *testing.T, cfg Config) (*Ruler, func()) {
 }
 
 func newTestRuler(t *testing.T, cfg Config) (*Ruler, func()) {
-	ruler, cleanup := newRuler(t, cfg)
+	ruler, cleanup := buildRuler(t, cfg, nil)
 	require.NoError(t, services.StartAndAwaitRunning(context.Background(), ruler))
 
 	// Ensure all rules are loaded before usage
@@ -276,12 +326,13 @@ func TestSharding(t *testing.T) {
 	type expectedRulesMap map[string]map[string]rulespb.RuleGroupList
 
 	type testCase struct {
-		sharding         bool
-		shardingStrategy string
-		shuffleShardSize int
-		setupRing        func(*ring.Desc)
-		enabledUsers     []string
-		disabledUsers    []string
+		sharding               bool
+		shardingStrategy       string
+		expectedGetRulersError error
+		shuffleShardSize       int
+		setupRing              func(*ring.Desc)
+		enabledUsers           []string
+		disabledUsers          []string
 
 		expectedRules expectedRulesMap
 	}
@@ -422,8 +473,9 @@ func TestSharding(t *testing.T) {
 		},
 
 		"default sharding, unhealthy ACTIVE ruler": {
-			sharding:         true,
-			shardingStrategy: util.ShardingStrategyDefault,
+			sharding:               true,
+			shardingStrategy:       util.ShardingStrategyDefault,
+			expectedGetRulersError: ring.ErrTooManyUnhealthyInstances,
 
 			setupRing: func(desc *ring.Desc) {
 				desc.AddIngester(ruler1, ruler1Addr, "", sortTokens([]uint32{user1Group1Token + 1, user2Group1Token + 1}), ring.ACTIVE, time.Now())
@@ -446,8 +498,9 @@ func TestSharding(t *testing.T) {
 		},
 
 		"default sharding, LEAVING ruler": {
-			sharding:         true,
-			shardingStrategy: util.ShardingStrategyDefault,
+			sharding:               true,
+			expectedGetRulersError: ring.ErrTooManyUnhealthyInstances,
+			shardingStrategy:       util.ShardingStrategyDefault,
 
 			setupRing: func(desc *ring.Desc) {
 				desc.AddIngester(ruler1, ruler1Addr, "", sortTokens([]uint32{user1Group1Token + 1, user2Group1Token + 1}), ring.LEAVING, time.Now())
@@ -462,8 +515,9 @@ func TestSharding(t *testing.T) {
 		},
 
 		"default sharding, JOINING ruler": {
-			sharding:         true,
-			shardingStrategy: util.ShardingStrategyDefault,
+			sharding:               true,
+			shardingStrategy:       util.ShardingStrategyDefault,
+			expectedGetRulersError: ring.ErrTooManyUnhealthyInstances,
 
 			setupRing: func(desc *ring.Desc) {
 				desc.AddIngester(ruler1, ruler1Addr, "", sortTokens([]uint32{user1Group1Token + 1, user2Group1Token + 1}), ring.JOINING, time.Now())
@@ -640,6 +694,11 @@ func TestSharding(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			kvStore := consul.NewInMemoryClient(ring.GetCodec())
+			expectedRulerMapByAddr := map[string]map[string]rulespb.RuleGroupList{}
+
+			expectedRulerMapByAddr[ruler1Addr] = tc.expectedRules[ruler1]
+			expectedRulerMapByAddr[ruler2Addr] = tc.expectedRules[ruler2]
+			expectedRulerMapByAddr[ruler3Addr] = tc.expectedRules[ruler3]
 
 			setupRuler := func(id string, host string, port int, forceRing *ring.Ring) *Ruler {
 				cfg := Config{
@@ -660,7 +719,7 @@ func TestSharding(t *testing.T) {
 					DisabledTenants:  tc.disabledUsers,
 				}
 
-				r, cleanup := newRuler(t, cfg)
+				r, cleanup := buildRuler(t, cfg, expectedRulerMapByAddr)
 				r.limits = ruleLimits{evalDelay: 0, tenantShard: tc.shuffleShardSize}
 				t.Cleanup(cleanup)
 
@@ -728,6 +787,29 @@ func TestSharding(t *testing.T) {
 			addToExpected(ruler3, r3)
 
 			require.Equal(t, tc.expectedRules, expected)
+
+			// With sharding enabled, we should retrieve all Rules when calling any ruler
+			if tc.sharding {
+				rulesPerUser := map[string]int{}
+
+				for _, r := range tc.expectedRules {
+					for u, rules := range r {
+						rulesPerUser[u] = rulesPerUser[u] + len(rules)
+					}
+				}
+
+				for u, count := range rulesPerUser {
+					ctx := user.InjectOrgID(context.Background(), u)
+					rulesState, err := r1.GetRules(ctx)
+					if tc.expectedGetRulersError != nil {
+						require.Error(t, tc.expectedGetRulersError)
+					} else {
+						require.NoError(t, err)
+						require.Equal(t, count, len(rulesState))
+					}
+				}
+			}
+
 		})
 	}
 }
