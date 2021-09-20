@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/alertmanager/notify"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/grafana/dskit/flagext"
@@ -88,6 +90,8 @@ type MultitenantAlertmanagerConfig struct {
 
 	// For the state persister.
 	Persister PersisterConfig `yaml:",inline"`
+
+	customNotifierFunc CustomNotifierFunc `yaml:"-"`
 }
 
 type ClusterConfig struct {
@@ -97,6 +101,23 @@ type ClusterConfig struct {
 	PeerTimeout      time.Duration          `yaml:"peer_timeout"`
 	GossipInterval   time.Duration          `yaml:"gossip_interval"`
 	PushPullInterval time.Duration          `yaml:"push_pull_interval"`
+}
+
+type customNotify struct {
+	notify.Notifier
+	notify.ResolvedSender
+	Name string
+}
+
+type CustomNotifierFunc func(rawConfig string) ([]customNotify, error)
+
+type CustomNotifierFactory struct {
+	customNotifierFunc CustomNotifierFunc
+	rawConfig          string
+}
+
+func (f *CustomNotifierFactory) build() ([]customNotify, error) {
+	return f.customNotifierFunc(f.rawConfig)
 }
 
 const (
@@ -928,19 +949,20 @@ func (am *MultitenantAlertmanager) newAlertmanager(userID string, amConfig *amco
 	}
 
 	newAM, err := New(&Config{
-		UserID:            userID,
-		TenantDataDir:     tenantDir,
-		Logger:            am.logger,
-		Peer:              am.peer,
-		PeerTimeout:       am.cfg.Cluster.PeerTimeout,
-		Retention:         am.cfg.Retention,
-		ExternalURL:       am.cfg.ExternalURL.URL,
-		ShardingEnabled:   am.cfg.ShardingEnabled,
-		Replicator:        am,
-		ReplicationFactor: am.cfg.ShardingRing.ReplicationFactor,
-		Store:             am.store,
-		PersisterConfig:   am.cfg.Persister,
-		Limits:            am.limits,
+		UserID:             userID,
+		TenantDataDir:      tenantDir,
+		Logger:             am.logger,
+		Peer:               am.peer,
+		PeerTimeout:        am.cfg.Cluster.PeerTimeout,
+		Retention:          am.cfg.Retention,
+		ExternalURL:        am.cfg.ExternalURL.URL,
+		CustomNotifierFunc: am.cfg.customNotifierFunc,
+		ShardingEnabled:    am.cfg.ShardingEnabled,
+		Replicator:         am,
+		ReplicationFactor:  am.cfg.ShardingRing.ReplicationFactor,
+		Store:              am.store,
+		PersisterConfig:    am.cfg.Persister,
+		Limits:             am.limits,
 	}, reg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start Alertmanager for user %v: %v", userID, err)
