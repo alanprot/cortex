@@ -34,6 +34,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/util/flagext"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/cortexproject/cortex/pkg/util/services"
+	"github.com/cortexproject/cortex/pkg/util/validation"
 )
 
 const (
@@ -50,8 +51,9 @@ var (
 
 	supportedShardingStrategies = []string{util.ShardingStrategyDefault, util.ShardingStrategyShuffle}
 	errInvalidShardingStrategy  = errors.New("invalid sharding strategy")
+	errInvalidTenantShardSize   = errors.New("invalid tenant shard size, the value must be greater than 0")
 
-	DefaultBlocksGrouperFactory = func(ctx context.Context, cfg Config, bkt objstore.Bucket, logger log.Logger, reg prometheus.Registerer, blocksMarkedForDeletion prometheus.Counter, garbageCollectedBlocks prometheus.Counter) compact.Grouper {
+	DefaultBlocksGrouperFactory = func(ctx context.Context, cfg Config, bkt objstore.Bucket, logger log.Logger, reg prometheus.Registerer, blocksMarkedForDeletion prometheus.Counter, garbageCollectedBlocks prometheus.Counter, _ prometheus.Gauge, _ *ring.Ring, _ *ring.Lifecycler, _ Limits, _ string) compact.Grouper {
 		return compact.NewDefaultGrouper(
 			logger,
 			bkt,
@@ -64,7 +66,7 @@ var (
 			metadata.NoneFunc)
 	}
 
-	ShuffleShardingGrouperFactory = func(ctx context.Context, cfg Config, bkt objstore.Bucket, logger log.Logger, reg prometheus.Registerer, blocksMarkedForDeletion prometheus.Counter, garbageCollectedBlocks prometheus.Counter) compact.Grouper {
+	ShuffleShardingGrouperFactory = func(ctx context.Context, cfg Config, bkt objstore.Bucket, logger log.Logger, reg prometheus.Registerer, blocksMarkedForDeletion prometheus.Counter, garbageCollectedBlocks prometheus.Counter, remainingPlannedCompactions prometheus.Gauge, ring *ring.Ring, ringLifecycle *ring.Lifecycler, limits Limits, userID string) compact.Grouper {
 		return NewShuffleShardingGrouper(
 			logger,
 			bkt,
@@ -74,8 +76,13 @@ var (
 			blocksMarkedForDeletion,
 			prometheus.NewCounter(prometheus.CounterOpts{}),
 			garbageCollectedBlocks,
+			remainingPlannedCompactions,
 			metadata.NoneFunc,
-			cfg)
+			cfg,
+			ring,
+			ringLifecycle.Addr,
+			limits,
+			userID)
 	}
 
 	DefaultBlocksCompactorFactory = func(ctx context.Context, cfg Config, logger log.Logger, reg prometheus.Registerer) (compact.Compactor, compact.Planner, error) {
@@ -108,6 +115,11 @@ type BlocksGrouperFactory func(
 	reg prometheus.Registerer,
 	blocksMarkedForDeletion prometheus.Counter,
 	garbageCollectedBlocks prometheus.Counter,
+	remainingPlannedCompactions prometheus.Gauge,
+	ring *ring.Ring,
+	ringLifecycler *ring.Lifecycler,
+	limit Limits,
+	userID string,
 ) compact.Grouper
 
 // BlocksCompactorFactory builds and returns the compactor and planner to use to compact a tenant's blocks.
@@ -117,6 +129,11 @@ type BlocksCompactorFactory func(
 	logger log.Logger,
 	reg prometheus.Registerer,
 ) (compact.Compactor, compact.Planner, error)
+
+// Limits defines limits used by the Compactor.
+type Limits interface {
+	CompactorTenantShardSize(userID string) int
+}
 
 // Config holds the Compactor config.
 type Config struct {
@@ -185,7 +202,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.Var(&cfg.DisabledTenants, "compactor.disabled-tenants", "Comma separated list of tenants that cannot be compacted by this compactor. If specified, and compactor would normally pick given tenant for compaction (via -compactor.enabled-tenants or sharding), it will be ignored instead.")
 }
 
-func (cfg *Config) Validate() error {
+func (cfg *Config) Validate(limits validation.Limits) error {
 	// Each block range period should be divisible by the previous one.
 	for i := 1; i < len(cfg.BlockRanges); i++ {
 		if cfg.BlockRanges[i]%cfg.BlockRanges[i-1] != 0 {
@@ -196,6 +213,12 @@ func (cfg *Config) Validate() error {
 	// Make sure a valid sharding strategy is being used
 	if !util.StringsContain(supportedShardingStrategies, cfg.ShardingStrategy) {
 		return errInvalidShardingStrategy
+	}
+
+	if cfg.ShardingEnabled && cfg.ShardingStrategy == util.ShardingStrategyShuffle {
+		if limits.CompactorTenantShardSize <= 0 {
+			return errInvalidTenantShardSize
+		}
 	}
 
 	return nil
@@ -218,6 +241,7 @@ type Compactor struct {
 	parentLogger   log.Logger
 	registerer     prometheus.Registerer
 	allowedTenants *util.AllowedTenants
+	limits         Limits
 
 	// Functions that creates bucket client, grouper, planner and compactor using the context.
 	// Useful for injecting mock objects from tests.
@@ -256,13 +280,14 @@ type Compactor struct {
 	compactionRunInterval          prometheus.Gauge
 	blocksMarkedForDeletion        prometheus.Counter
 	garbageCollectedBlocks         prometheus.Counter
+	remainingPlannedCompactions    prometheus.Gauge
 
 	// TSDB syncer metrics
 	syncerMetrics *syncerMetrics
 }
 
 // NewCompactor makes a new Compactor.
-func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider ConfigProvider, logger log.Logger, registerer prometheus.Registerer) (*Compactor, error) {
+func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider ConfigProvider, logger log.Logger, registerer prometheus.Registerer, limits Limits) (*Compactor, error) {
 	bucketClientFactory := func(ctx context.Context) (objstore.Bucket, error) {
 		return bucket.NewClient(ctx, storageCfg.Bucket, "compactor", logger, registerer)
 	}
@@ -285,7 +310,7 @@ func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfi
 		}
 	}
 
-	cortexCompactor, err := newCompactor(compactorCfg, storageCfg, cfgProvider, logger, registerer, bucketClientFactory, blocksGrouperFactory, blocksCompactorFactory)
+	cortexCompactor, err := newCompactor(compactorCfg, storageCfg, cfgProvider, logger, registerer, bucketClientFactory, blocksGrouperFactory, blocksCompactorFactory, limits)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Cortex blocks compactor")
 	}
@@ -302,7 +327,15 @@ func newCompactor(
 	bucketClientFactory func(ctx context.Context) (objstore.Bucket, error),
 	blocksGrouperFactory BlocksGrouperFactory,
 	blocksCompactorFactory BlocksCompactorFactory,
+	limits Limits,
 ) (*Compactor, error) {
+	var remainingPlannedCompactions prometheus.Gauge
+	if compactorCfg.ShardingStrategy == util.ShardingStrategyShuffle {
+		remainingPlannedCompactions = promauto.With(registerer).NewGauge(prometheus.GaugeOpts{
+			Name: "cortex_compactor_remaining_planned_compactions",
+			Help: "Total number of plans that remain to be compacted. Only available with shuffle-sharding strategy",
+		})
+	}
 	c := &Compactor{
 		compactorCfg:           compactorCfg,
 		storageCfg:             storageCfg,
@@ -361,6 +394,8 @@ func newCompactor(
 			Name: "cortex_compactor_garbage_collected_blocks_total",
 			Help: "Total number of blocks marked for deletion by compactor.",
 		}),
+		remainingPlannedCompactions: remainingPlannedCompactions,
+		limits:                      limits,
 	}
 
 	if len(compactorCfg.EnabledTenants) > 0 {
@@ -398,7 +433,7 @@ func (c *Compactor) starting(ctx context.Context) error {
 	c.bucketClient = bucketindex.BucketWithGlobalMarkers(c.bucketClient)
 
 	// Create the users scanner.
-	c.usersScanner = cortex_tsdb.NewUsersScanner(c.bucketClient, c.ownUser, c.parentLogger)
+	c.usersScanner = cortex_tsdb.NewUsersScanner(c.bucketClient, c.ownUserForCleanUp, c.parentLogger)
 
 	// Create the blocks cleaner (service).
 	c.blocksCleaner = NewBlocksCleaner(BlocksCleanerConfig{
@@ -552,7 +587,7 @@ func (c *Compactor) compactUsers(ctx context.Context) {
 		}
 
 		// Ensure the user ID belongs to our shard.
-		if owned, err := c.ownUser(userID); err != nil {
+		if owned, err := c.ownUserForCompaction(userID); err != nil {
 			c.compactionRunSkippedTenants.Inc()
 			level.Warn(c.logger).Log("msg", "unable to check if user is owned by this shard", "user", userID, "err", err)
 			continue
@@ -696,7 +731,7 @@ func (c *Compactor) compactUser(ctx context.Context, userID string) error {
 	compactor, err := compact.NewBucketCompactor(
 		ulogger,
 		syncer,
-		c.blocksGrouperFactory(ctx, c.compactorCfg, bucket, ulogger, reg, c.blocksMarkedForDeletion, c.garbageCollectedBlocks),
+		c.blocksGrouperFactory(ctx, c.compactorCfg, bucket, ulogger, reg, c.blocksMarkedForDeletion, c.garbageCollectedBlocks, c.remainingPlannedCompactions, c.ring, c.ringLifecycler, c.limits, userID),
 		c.blocksPlanner,
 		c.blocksCompactor,
 		path.Join(c.compactorCfg.DataDir, "compact"),
@@ -749,14 +784,35 @@ func (c *Compactor) discoverUsers(ctx context.Context) ([]string, error) {
 	return users, err
 }
 
-func (c *Compactor) ownUser(userID string) (bool, error) {
+func (c *Compactor) ownUserForCompaction(userID string) (bool, error) {
+	return c.ownUser(userID, false)
+}
+
+func (c *Compactor) ownUserForCleanUp(userID string) (bool, error) {
+	return c.ownUser(userID, true)
+}
+
+func (c *Compactor) ownUser(userID string, isCleanUp bool) (bool, error) {
 	if !c.allowedTenants.IsAllowed(userID) {
 		return false, nil
 	}
 
-	// Always owned if sharding is disabled.
+	// Always owned if sharding is disabled
 	if !c.compactorCfg.ShardingEnabled {
 		return true, nil
+	}
+
+	// If we aren't cleaning up user blocks, and we are using shuffle-sharding, ownership is determined by a subring
+	// Cleanup should only be owned by a single compactor, as there could be race conditions during block deletion
+	if !isCleanUp && c.compactorCfg.ShardingStrategy == util.ShardingStrategyShuffle {
+		subRing := c.ring.ShuffleShard(userID, c.limits.CompactorTenantShardSize(userID))
+
+		rs, err := subRing.GetAllHealthy(RingOp)
+		if err != nil {
+			return false, err
+		}
+
+		return rs.Includes(c.ringLifecycler.Addr), nil
 	}
 
 	// Hash the user ID.
