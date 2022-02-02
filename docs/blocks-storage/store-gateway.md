@@ -619,6 +619,36 @@ blocks_storage:
         # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.auto-discovery
         [auto_discovery: <boolean> | default = false]
 
+        # Enable TLS in the memcached client. This flag needs to be enabled when
+        # any other TLS flag is set. If set to false, insecure connection to
+        # memcached server will be used.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-enabled
+        [tls_enabled: <boolean> | default = false]
+
+        # Path to the client certificate file, which will be used for
+        # authenticating with the server. Also requires the key path to be
+        # configured.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-cert-path
+        [tls_cert_path: <string> | default = ""]
+
+        # Path to the key file for the client certificate. Also requires the
+        # client certificate to be configured.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-key-path
+        [tls_key_path: <string> | default = ""]
+
+        # Path to the CA certificates file to validate server certificate
+        # against. If not set, the host's root CA certificates are used.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-ca-path
+        [tls_ca_path: <string> | default = ""]
+
+        # Override the expected name on the server certificate.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-server-name
+        [tls_ca_name: <string> | default = ""]
+
+        # Skip validating server certificate.
+        # CLI flag: -blocks-storage.bucket-store.index-cache.memcached.tls-insecure-skip-verify
+        [tls_insecure_skip_verify: <boolean> | default = false]
+
     chunks_cache:
       # Backend for chunks cache, if not empty. Supported values: memcached.
       # CLI flag: -blocks-storage.bucket-store.chunks-cache.backend
@@ -670,6 +700,36 @@ blocks_storage:
         # like GCP and AWS
         # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.auto-discovery
         [auto_discovery: <boolean> | default = false]
+
+        # Enable TLS in the memcached client. This flag needs to be enabled when
+        # any other TLS flag is set. If set to false, insecure connection to
+        # memcached server will be used.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-enabled
+        [tls_enabled: <boolean> | default = false]
+
+        # Path to the client certificate file, which will be used for
+        # authenticating with the server. Also requires the key path to be
+        # configured.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-cert-path
+        [tls_cert_path: <string> | default = ""]
+
+        # Path to the key file for the client certificate. Also requires the
+        # client certificate to be configured.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-key-path
+        [tls_key_path: <string> | default = ""]
+
+        # Path to the CA certificates file to validate server certificate
+        # against. If not set, the host's root CA certificates are used.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-ca-path
+        [tls_ca_path: <string> | default = ""]
+
+        # Override the expected name on the server certificate.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-server-name
+        [tls_ca_name: <string> | default = ""]
+
+        # Skip validating server certificate.
+        # CLI flag: -blocks-storage.bucket-store.chunks-cache.memcached.tls-insecure-skip-verify
+        [tls_insecure_skip_verify: <boolean> | default = false]
 
       # Size of each subrange that bucket object is split into for better
       # caching.
@@ -741,6 +801,36 @@ blocks_storage:
         # like GCP and AWS
         # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.auto-discovery
         [auto_discovery: <boolean> | default = false]
+
+        # Enable TLS in the memcached client. This flag needs to be enabled when
+        # any other TLS flag is set. If set to false, insecure connection to
+        # memcached server will be used.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-enabled
+        [tls_enabled: <boolean> | default = false]
+
+        # Path to the client certificate file, which will be used for
+        # authenticating with the server. Also requires the key path to be
+        # configured.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-cert-path
+        [tls_cert_path: <string> | default = ""]
+
+        # Path to the key file for the client certificate. Also requires the
+        # client certificate to be configured.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-key-path
+        [tls_key_path: <string> | default = ""]
+
+        # Path to the CA certificates file to validate server certificate
+        # against. If not set, the host's root CA certificates are used.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-ca-path
+        [tls_ca_path: <string> | default = ""]
+
+        # Override the expected name on the server certificate.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-server-name
+        [tls_ca_name: <string> | default = ""]
+
+        # Skip validating server certificate.
+        # CLI flag: -blocks-storage.bucket-store.metadata-cache.memcached.tls-insecure-skip-verify
+        [tls_insecure_skip_verify: <boolean> | default = false]
 
       # How long to cache list of tenants in the bucket.
       # CLI flag: -blocks-storage.bucket-store.metadata-cache.tenants-list-ttl
