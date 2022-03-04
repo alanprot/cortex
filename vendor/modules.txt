@@ -131,7 +131,7 @@ github.com/aws/aws-sdk-go/service/sts/stsiface
 github.com/beorn7/perks/quantile
 # github.com/blang/semver/v4 v4.0.0
 github.com/blang/semver/v4
-# github.com/bradfitz/gomemcache v0.0.0-20190913173617-a41fca850d0b => github.com/themihai/gomemcache v0.0.0-20180902122335-24332e2d58ab
+# github.com/bradfitz/gomemcache v0.0.0-20190913173617-a41fca850d0b => github.com/aws-observability/gomemcache v0.0.0-20220224015701-cf29ea982d31
 ## explicit
 github.com/bradfitz/gomemcache/memcache
 # github.com/cenkalti/backoff/v4 v4.1.2
@@ -595,7 +595,7 @@ github.com/stretchr/objx
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/mock
 github.com/stretchr/testify/require
-# github.com/thanos-io/thanos v0.22.0 => github.com/thanos-io/thanos v0.19.1-0.20211208205607-d1acaea2a11a
+# github.com/thanos-io/thanos v0.22.0 => github.com/aws-observability/thanos v0.0.0-20220303212352-d8df9733025e
 ## explicit
 github.com/thanos-io/thanos/pkg/block
 github.com/thanos-io/thanos/pkg/block/indexheader
@@ -638,6 +638,7 @@ github.com/thanos-io/thanos/pkg/store/storepb/prompb
 github.com/thanos-io/thanos/pkg/strutil
 github.com/thanos-io/thanos/pkg/targets/targetspb
 github.com/thanos-io/thanos/pkg/testutil
+github.com/thanos-io/thanos/pkg/tls
 github.com/thanos-io/thanos/pkg/tracing
 # github.com/uber/jaeger-client-go v2.29.1+incompatible
 ## explicit
@@ -1009,5 +1010,5 @@ sigs.k8s.io/yaml
 # k8s.io/client-go => k8s.io/client-go v0.21.3
 # k8s.io/api => k8s.io/api v0.21.3
 # github.com/gocql/gocql => github.com/grafana/gocql v0.0.0-20200605141915-ba5dc39ece85
-# github.com/bradfitz/gomemcache => github.com/themihai/gomemcache v0.0.0-20180902122335-24332e2d58ab
+# github.com/bradfitz/gomemcache => github.com/aws-observability/gomemcache v0.0.0-20220224015701-cf29ea982d31
 # github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.2.5-0.20211201083710-c7bc8e9df94b
