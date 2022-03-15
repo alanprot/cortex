@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/notifier"
 	promRules "github.com/prometheus/prometheus/rules"
+	"github.com/prometheus/prometheus/util/stats"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/weaveworks/common/user"
 	"golang.org/x/sync/errgroup"
@@ -123,8 +124,9 @@ type Config struct {
 
 	RingCheckPeriod time.Duration `yaml:"-"`
 
-	EnableQueryStats      bool `yaml:"query_stats_enabled"`
-	DisableRuleGroupLabel bool `yaml:"disable_rule_group_label"`
+	EnableQueryStats      bool                                                      `yaml:"query_stats_enabled"`
+	DisableRuleGroupLabel bool                                                      `yaml:"disable_rule_group_label"`
+	ReportStats           func(ctx context.Context, qs stats.QueryStats, err error) `yaml:"-"`
 }
 
 // Validate config and returns error on failure

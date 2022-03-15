@@ -49,6 +49,7 @@ type CacheGenNumberLoader interface {
 type ResultsCacheConfig struct {
 	CacheConfig cache.Config `yaml:"cache"`
 	Compression string       `yaml:"compression"`
+	CacheStats  bool         `yaml:"cache_stats"`
 }
 
 // RegisterFlags registers flags.
@@ -56,6 +57,7 @@ func (cfg *ResultsCacheConfig) RegisterFlags(f *flag.FlagSet) {
 	cfg.CacheConfig.RegisterFlagsWithPrefix("frontend.", "", f)
 
 	f.StringVar(&cfg.Compression, "frontend.compression", "", "Use compression in results cache. Supported values are: 'snappy' and '' (disable compression).")
+	f.BoolVar(&cfg.CacheStats, "frontend.cache-stats", false, "Cache Statistics on results cache.")
 	//lint:ignore faillint Need to pass the global logger like this for warning on deprecated methods
 	flagext.DeprecatedFlag(f, "frontend.cache-split-interval", "Deprecated: The maximum interval expected for each request, results will be cached per single interval. This behavior is now determined by querier.split-queries-by-interval.", util_log.Logger)
 }
@@ -76,6 +78,7 @@ type Extractor interface {
 	// Extract extracts a subset of a response from the `start` and `end` timestamps in milliseconds in the `from` response.
 	Extract(start, end int64, from Response) Response
 	ResponseWithoutHeaders(resp Response) Response
+	ResponseWithoutStats(resp Response) Response
 }
 
 // PrometheusResponseExtractor helps extracting specific info from Query Response.
@@ -89,6 +92,7 @@ func (PrometheusResponseExtractor) Extract(start, end int64, from Response) Resp
 		Data: PrometheusData{
 			ResultType: promRes.Data.ResultType,
 			Result:     extractMatrix(start, end, promRes.Data.Result),
+			Stats:      extractStats(start, end, promRes.Data.Stats),
 		},
 		Headers: promRes.Headers,
 	}
@@ -103,7 +107,22 @@ func (PrometheusResponseExtractor) ResponseWithoutHeaders(resp Response) Respons
 		Data: PrometheusData{
 			ResultType: promRes.Data.ResultType,
 			Result:     promRes.Data.Result,
+			Stats:      promRes.Data.Stats,
 		},
+	}
+}
+
+// ResponseWithoutStats is useful in caching data without headers since
+// we anyways do not need headers for sending back the response so this saves some space by reducing size of the objects.
+func (PrometheusResponseExtractor) ResponseWithoutStats(resp Response) Response {
+	promRes := resp.(*PrometheusResponse)
+	return &PrometheusResponse{
+		Status: StatusSuccess,
+		Data: PrometheusData{
+			ResultType: promRes.Data.ResultType,
+			Result:     promRes.Data.Result,
+		},
+		Headers: promRes.Headers,
 	}
 }
 
@@ -139,6 +158,7 @@ type resultsCache struct {
 	merger               Merger
 	cacheGenNumberLoader CacheGenNumberLoader
 	shouldCache          ShouldCacheFn
+	cacheStats           bool
 }
 
 // NewResultsCacheMiddleware creates results cache middleware from config.
@@ -183,14 +203,20 @@ func NewResultsCacheMiddleware(
 			splitter:             splitter,
 			cacheGenNumberLoader: cacheGenNumberLoader,
 			shouldCache:          shouldCache,
+			cacheStats:           cfg.CacheStats,
 		}
 	}), c, nil
 }
 
 func (s resultsCache) Do(ctx context.Context, r Request) (Response, error) {
 	tenantIDs, err := tenant.TenantIDs(ctx)
+	respWithStats := r.GetStats() != ""
 	if err != nil {
 		return nil, httpgrpc.Errorf(http.StatusBadRequest, err.Error())
+	}
+
+	if s.cacheStats {
+		r = r.WithStats("all")
 	}
 
 	if s.shouldCache != nil && !s.shouldCache(r) {
@@ -228,6 +254,9 @@ func (s resultsCache) Do(ctx context.Context, r Request) (Response, error) {
 		s.put(ctx, key, extents)
 	}
 
+	if !respWithStats {
+		response = s.extractor.ResponseWithoutStats(response)
+	}
 	return response, err
 }
 
@@ -615,6 +644,21 @@ func jaegerTraceID(ctx context.Context) string {
 	}
 
 	return spanContext.TraceID().String()
+}
+
+func extractStats(start, end int64, stats *PrometheusResponseStats) *PrometheusResponseStats {
+	if stats == nil || stats.Samples == nil {
+		return stats
+	}
+
+	result := &PrometheusResponseStats{Samples: &PrometheusResponseSamplesStats{}}
+	for _, s := range stats.Samples.TotalQueryableSamplesPerStep {
+		if start <= s.TimestampMs && s.TimestampMs <= end {
+			result.Samples.TotalQueryableSamplesPerStep = append(result.Samples.TotalQueryableSamplesPerStep, s)
+			result.Samples.TotalQueryableSamples += s.Value
+		}
+	}
+	return result
 }
 
 func extractMatrix(start, end int64, matrix []SampleStream) []SampleStream {

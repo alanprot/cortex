@@ -196,6 +196,10 @@ func (q *query) Exec(ctx context.Context) *Result {
 	// Exec query.
 	res, warnings, err := q.ng.exec(ctx, q)
 
+	if q.ng.ReportStats != nil {
+		q.ng.ReportStats(ctx, stats.NewQueryStats(q.Stats()), err)
+	}
+
 	return &Result{Err: err, Value: res, Warnings: warnings}
 }
 
@@ -267,6 +271,9 @@ type EngineOpts struct {
 
 	// EnablePerStepStats if true allows for per-step stats to be computed on request. Disabled otherwise.
 	EnablePerStepStats bool
+
+	// ReportStats if set, called after every query runs
+	ReportStats func(ctx context.Context, qs stats.QueryStats, err error)
 }
 
 // Engine handles the lifetime of queries from beginning to end.
@@ -284,6 +291,7 @@ type Engine struct {
 	enableAtModifier         bool
 	enableNegativeOffset     bool
 	enablePerStepStats       bool
+	ReportStats func(ctx context.Context, qs stats.QueryStats, err error)
 }
 
 // NewEngine returns a new engine.
@@ -367,6 +375,7 @@ func NewEngine(opts EngineOpts) *Engine {
 		enableAtModifier:         opts.EnableAtModifier,
 		enableNegativeOffset:     opts.EnableNegativeOffset,
 		enablePerStepStats:       opts.EnablePerStepStats,
+		ReportStats: 			  opts.ReportStats,
 	}
 }
 

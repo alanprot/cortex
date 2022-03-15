@@ -1165,6 +1165,10 @@ results_cache:
   # CLI flag: -frontend.compression
   [compression: <string> | default = ""]
 
+  # Cache Statistics on results cache.
+  # CLI flag: -frontend.cache-stats
+  [cache_stats: <boolean> | default = false]
+
 # Cache query results.
 # CLI flag: -querier.cache-results
 [cache_results: <boolean> | default = false]
