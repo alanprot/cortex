@@ -663,7 +663,7 @@ github.com/uber/jaeger-client-go/utils
 # github.com/uber/jaeger-lib v2.4.1+incompatible
 github.com/uber/jaeger-lib/metrics
 github.com/uber/jaeger-lib/metrics/prometheus
-# github.com/weaveworks/common v0.0.0-20210913144402-035033b78a78
+# github.com/weaveworks/common v0.0.0-20210913144402-035033b78a78 => github.com/aws-observability/weaveworks-common v0.0.0-20220325010551-dfd759d369cd
 ## explicit
 github.com/weaveworks/common/aws
 github.com/weaveworks/common/errors
@@ -675,6 +675,7 @@ github.com/weaveworks/common/logging
 github.com/weaveworks/common/middleware
 github.com/weaveworks/common/mtime
 github.com/weaveworks/common/server
+github.com/weaveworks/common/server/opttls
 github.com/weaveworks/common/signals
 github.com/weaveworks/common/test
 github.com/weaveworks/common/tracing
@@ -1012,3 +1013,4 @@ sigs.k8s.io/yaml
 # github.com/gocql/gocql => github.com/grafana/gocql v0.0.0-20200605141915-ba5dc39ece85
 # github.com/bradfitz/gomemcache => github.com/aws-observability/gomemcache v0.0.0-20220224015701-cf29ea982d31
 # github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.2.5-0.20211201083710-c7bc8e9df94b
+# github.com/efficientgo/tools/core => github.com/efficientgo/tools/core v0.0.0-20210731122119-5d4a0645ce9a

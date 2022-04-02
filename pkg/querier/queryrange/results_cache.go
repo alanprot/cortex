@@ -254,7 +254,7 @@ func (s resultsCache) Do(ctx context.Context, r Request) (Response, error) {
 		s.put(ctx, key, extents)
 	}
 
-	if !respWithStats {
+	if err == nil && !respWithStats {
 		response = s.extractor.ResponseWithoutStats(response)
 	}
 	return response, err

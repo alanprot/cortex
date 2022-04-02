@@ -10,6 +10,8 @@ import (
 	_ "net/http/pprof" // anonymous import to get the pprof handler registered
 	"time"
 
+	"github.com/weaveworks/common/server/opttls"
+
 	"github.com/gorilla/mux"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	otgrpc "github.com/opentracing-contrib/go-grpc"
@@ -50,6 +52,12 @@ type SignalHandler interface {
 	Stop()
 }
 
+type TLSStruct struct {
+	node_https.TLSStruct `yaml:",inline"`
+
+	Optional bool `yaml:"optional"`
+}
+
 // Config for a Server
 type Config struct {
 	MetricsNamespace  string `yaml:"-"`
@@ -62,8 +70,8 @@ type Config struct {
 	GRPCListenPort    int    `yaml:"grpc_listen_port"`
 	GRPCConnLimit     int    `yaml:"grpc_listen_conn_limit"`
 
-	HTTPTLSConfig node_https.TLSStruct `yaml:"http_tls_config"`
-	GRPCTLSConfig node_https.TLSStruct `yaml:"grpc_tls_config"`
+	HTTPTLSConfig TLSStruct `yaml:"http_tls_config"`
+	GRPCTLSConfig TLSStruct `yaml:"grpc_tls_config"`
 
 	RegisterInstrumentation bool `yaml:"register_instrumentation"`
 	ExcludeRequestInLog     bool `yaml:"-"`
@@ -114,10 +122,12 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.HTTPTLSConfig.TLSKeyPath, "server.http-tls-key-path", "", "HTTP server key path.")
 	f.StringVar(&cfg.HTTPTLSConfig.ClientAuth, "server.http-tls-client-auth", "", "HTTP TLS Client Auth type.")
 	f.StringVar(&cfg.HTTPTLSConfig.ClientCAs, "server.http-tls-ca-path", "", "HTTP TLS Client CA path.")
+	f.BoolVar(&cfg.HTTPTLSConfig.Optional, "server.http-tls-optional", false, "HTTP TLS and plaintext on the same port.")
 	f.StringVar(&cfg.GRPCTLSConfig.TLSCertPath, "server.grpc-tls-cert-path", "", "GRPC TLS server cert path.")
 	f.StringVar(&cfg.GRPCTLSConfig.TLSKeyPath, "server.grpc-tls-key-path", "", "GRPC TLS server key path.")
 	f.StringVar(&cfg.GRPCTLSConfig.ClientAuth, "server.grpc-tls-client-auth", "", "GRPC TLS Client Auth type.")
 	f.StringVar(&cfg.GRPCTLSConfig.ClientCAs, "server.grpc-tls-ca-path", "", "GRPC TLS Client CA path.")
+	f.BoolVar(&cfg.GRPCTLSConfig.Optional, "server.grpc-tls-optional", false, "GRPC TLS and plaintext on the same port.")
 	f.IntVar(&cfg.HTTPListenPort, "server.http-listen-port", 80, "HTTP server listen port.")
 	f.IntVar(&cfg.HTTPConnLimit, "server.http-conn-limit", 0, "Maximum number of simultaneous http connections, <=0 to disable")
 	f.StringVar(&cfg.GRPCListenNetwork, "server.grpc-listen-network", DefaultNetwork, "gRPC server listen network")
@@ -156,10 +166,11 @@ type Server struct {
 	grpcListener net.Listener
 	httpListener net.Listener
 
-	HTTP       *mux.Router
-	HTTPServer *http.Server
-	GRPC       *grpc.Server
-	Log        logging.Interface
+	HTTP               *mux.Router
+	HTTPServer         *http.Server
+	GRPC               *grpc.Server
+	Log                logging.Interface
+	optionalTlsCounter *prometheus.CounterVec
 }
 
 // New makes a new Server
@@ -211,7 +222,7 @@ func New(cfg Config) (*Server, error) {
 	var httpTLSConfig *tls.Config
 	if len(cfg.HTTPTLSConfig.TLSCertPath) > 0 && len(cfg.HTTPTLSConfig.TLSKeyPath) > 0 {
 		// Note: ConfigToTLSConfig from prometheus/node_exporter is awaiting security review.
-		httpTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.HTTPTLSConfig)
+		httpTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.HTTPTLSConfig.TLSStruct)
 		if err != nil {
 			return nil, fmt.Errorf("error generating http tls config: %v", err)
 		}
@@ -219,7 +230,7 @@ func New(cfg Config) (*Server, error) {
 	var grpcTLSConfig *tls.Config
 	if len(cfg.GRPCTLSConfig.TLSCertPath) > 0 && len(cfg.GRPCTLSConfig.TLSKeyPath) > 0 {
 		// Note: ConfigToTLSConfig from prometheus/node_exporter is awaiting security review.
-		grpcTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.GRPCTLSConfig)
+		grpcTLSConfig, err = node_https.ConfigToTLSConfig(&cfg.GRPCTLSConfig.TLSStruct)
 		if err != nil {
 			return nil, fmt.Errorf("error generating grpc tls config: %v", err)
 		}
@@ -256,6 +267,13 @@ func New(cfg Config) (*Server, error) {
 		Help:      "Current number of inflight requests.",
 	}, []string{"method", "route"})
 	prometheus.MustRegister(inflightRequests)
+
+	optionalTlsCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: cfg.MetricsNamespace,
+		Name:      "optional_tcp_connections",
+		Help:      "Total Number of new tcp connection per protocol.",
+	}, []string{"protocol", "tls"})
+	prometheus.MustRegister(optionalTlsCounter)
 
 	log.WithField("http", httpListener.Addr()).WithField("grpc", grpcListener.Addr()).Infof("server listening on addresses")
 
@@ -308,6 +326,9 @@ func New(cfg Config) (*Server, error) {
 	grpcOptions = append(grpcOptions, cfg.GRPCOptions...)
 	if grpcTLSConfig != nil {
 		grpcCreds := credentials.NewTLS(grpcTLSConfig)
+		if cfg.GRPCTLSConfig.Optional {
+			grpcCreds = opttls.NewTlsOptionalCred(grpcCreds, optionalTlsCounter)
+		}
 		grpcOptions = append(grpcOptions, grpc.Creds(grpcCreds))
 	}
 	grpcServer := grpc.NewServer(grpcOptions...)
@@ -381,10 +402,11 @@ func New(cfg Config) (*Server, error) {
 		grpcListener: grpcListener,
 		handler:      handler,
 
-		HTTP:       router,
-		HTTPServer: httpServer,
-		GRPC:       grpcServer,
-		Log:        log,
+		HTTP:               router,
+		HTTPServer:         httpServer,
+		GRPC:               grpcServer,
+		Log:                log,
+		optionalTlsCounter: optionalTlsCounter,
 	}, nil
 }
 
@@ -413,6 +435,8 @@ func (s *Server) Run() error {
 		var err error
 		if s.HTTPServer.TLSConfig == nil {
 			err = s.HTTPServer.Serve(s.httpListener)
+		} else if s.cfg.HTTPTLSConfig.Optional {
+			err = opttls.ServeTLSOptionally(s.HTTPServer, s.httpListener, s.cfg.HTTPTLSConfig.TLSCertPath, s.cfg.HTTPTLSConfig.TLSKeyPath, s.optionalTlsCounter)
 		} else {
 			err = s.HTTPServer.ServeTLS(s.httpListener, s.cfg.HTTPTLSConfig.TLSCertPath, s.cfg.HTTPTLSConfig.TLSKeyPath)
 		}
