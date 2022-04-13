@@ -22,6 +22,7 @@ service Ingester {
   rpc UserStats(UserStatsRequest) returns (UserStatsResponse) {};
   rpc AllUserStats(UserStatsRequest) returns (UsersStatsResponse) {};
   rpc MetricsForLabelMatchers(MetricsForLabelMatchersRequest) returns (MetricsForLabelMatchersResponse) {};
+  rpc MetricsForLabelMatchersStream(MetricsForLabelMatchersRequest) returns (stream cortexpb.Metric) {};
   rpc MetricsMetadata(MetricsMetadataRequest) returns (MetricsMetadataResponse) {};
 
   // TransferChunks allows leaving ingester (client) to stream chunks directly to joining ingesters (server).

@@ -2,11 +2,19 @@ package client
 
 import (
 	context "context"
+
+	"github.com/cortexproject/cortex/pkg/cortexpb"
 )
 
 // SendQueryStream wraps the stream's Send() checking if the context is done
 // before calling Send().
 func SendQueryStream(s Ingester_QueryStreamServer, m *QueryStreamResponse) error {
+	return sendWithContextErrChecking(s.Context(), func() error {
+		return s.Send(m)
+	})
+}
+
+func SendQueryMetricsForLabelMatchersStream(s Ingester_MetricsForLabelMatchersStreamServer, m *cortexpb.Metric) error {
 	return sendWithContextErrChecking(s.Context(), func() error {
 		return s.Send(m)
 	})

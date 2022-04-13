@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -959,21 +960,31 @@ func (d *Distributor) MetricsForLabelMatchers(ctx context.Context, from, through
 	metrics := map[model.Fingerprint]model.Metric{}
 
 	_, err = d.ForReplicationSet(ctx, replicationSet, func(ctx context.Context, client ingester_client.IngesterClient) (interface{}, error) {
-		resp, err := client.MetricsForLabelMatchers(ctx, req)
+		s, err := client.MetricsForLabelMatchersStream(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		ms := ingester_client.FromMetricsForLabelMatchersResponse(resp)
-		for _, m := range ms {
+
+		for {
+			l, err := s.Recv()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				return nil, err
+			}
+
+			m := cortexpb.FromLabelAdaptersToMetric(l.Labels)
+
 			if err := queryLimiter.AddSeries(cortexpb.FromMetricsToLabelAdapters(m)); err != nil {
 				return nil, err
 			}
+
 			mutex.Lock()
 			metrics[m.Fingerprint()] = m
 			mutex.Unlock()
 		}
 
-		return resp, nil
+		return nil, nil
 	})
 
 	if err != nil {

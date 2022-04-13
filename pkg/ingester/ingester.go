@@ -981,6 +981,58 @@ func (i *Ingester) LabelNames(ctx context.Context, req *client.LabelNamesRequest
 	return resp, nil
 }
 
+func (i *Ingester) MetricsForLabelMatchersStream(ctx context.Context, req *client.MetricsForLabelMatchersRequest, stream client.Ingester_MetricsForLabelMatchersStreamServer) error {
+	if i.cfg.BlocksStorageEnabled {
+		r, err := i.v2MetricsForLabelMatchers(ctx, req)
+		if err != nil {
+			for _, m := range r.Metric {
+				client.SendQueryMetricsForLabelMatchersStream(stream, m)
+			}
+		}
+		return err
+	}
+
+	if err := i.checkRunningOrStopping(); err != nil {
+		return err
+	}
+
+	i.userStatesMtx.RLock()
+	defer i.userStatesMtx.RUnlock()
+	state, ok, err := i.userStates.getViaContext(ctx)
+	if err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
+
+	// TODO Right now we ignore start and end.
+	_, _, matchersSet, err := client.FromMetricsForLabelMatchersRequest(req)
+	if err != nil {
+		return err
+	}
+
+	lss := map[model.Fingerprint]labels.Labels{}
+	for _, matchers := range matchersSet {
+		if err := state.forSeriesMatching(ctx, matchers, func(ctx context.Context, fp model.Fingerprint, series *memorySeries) error {
+			if _, ok := lss[fp]; !ok {
+				lss[fp] = series.metric
+			}
+			return nil
+		}, nil, 0); err != nil {
+			return err
+		}
+	}
+
+	result := &client.MetricsForLabelMatchersResponse{
+		Metric: make([]*cortexpb.Metric, 0, len(lss)),
+	}
+	for _, ls := range lss {
+		result.Metric = append(result.Metric, &cortexpb.Metric{Labels: cortexpb.FromLabelsToLabelAdapters(ls)})
+	}
+
+	return nil
+}
+
 // MetricsForLabelMatchers returns all the metrics which match a set of matchers.
 func (i *Ingester) MetricsForLabelMatchers(ctx context.Context, req *client.MetricsForLabelMatchersRequest) (*client.MetricsForLabelMatchersResponse, error) {
 	if i.cfg.BlocksStorageEnabled {
