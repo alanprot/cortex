@@ -981,9 +981,9 @@ func (i *Ingester) LabelNames(ctx context.Context, req *client.LabelNamesRequest
 	return resp, nil
 }
 
-func (i *Ingester) MetricsForLabelMatchersStream(ctx context.Context, req *client.MetricsForLabelMatchersRequest, stream client.Ingester_MetricsForLabelMatchersStreamServer) error {
+func (i *Ingester) MetricsForLabelMatchersStream(req *client.MetricsForLabelMatchersRequest, stream client.Ingester_MetricsForLabelMatchersStreamServer) error {
 	if i.cfg.BlocksStorageEnabled {
-		r, err := i.v2MetricsForLabelMatchers(ctx, req)
+		r, err := i.v2MetricsForLabelMatchers(stream.Context(), req)
 		if err != nil {
 			for _, m := range r.Metric {
 				client.SendQueryMetricsForLabelMatchersStream(stream, m)
@@ -998,7 +998,7 @@ func (i *Ingester) MetricsForLabelMatchersStream(ctx context.Context, req *clien
 
 	i.userStatesMtx.RLock()
 	defer i.userStatesMtx.RUnlock()
-	state, ok, err := i.userStates.getViaContext(ctx)
+	state, ok, err := i.userStates.getViaContext(stream.Context())
 	if err != nil {
 		return err
 	} else if !ok {
@@ -1013,7 +1013,7 @@ func (i *Ingester) MetricsForLabelMatchersStream(ctx context.Context, req *clien
 
 	lss := map[model.Fingerprint]labels.Labels{}
 	for _, matchers := range matchersSet {
-		if err := state.forSeriesMatching(ctx, matchers, func(ctx context.Context, fp model.Fingerprint, series *memorySeries) error {
+		if err := state.forSeriesMatching(stream.Context(), matchers, func(ctx context.Context, fp model.Fingerprint, series *memorySeries) error {
 			if _, ok := lss[fp]; !ok {
 				lss[fp] = series.metric
 			}
