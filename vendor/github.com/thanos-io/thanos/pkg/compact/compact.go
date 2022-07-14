@@ -1029,6 +1029,7 @@ func (cg *Group) compact(ctx context.Context, dir string, planner Planner, comp 
 
 		func(ctx context.Context, meta *metadata.Meta) {
 			g.Go(func() error {
+				var err error
 				tracing.DoInSpanWithErr(ctx, "compaction_block_download", func(ctx context.Context) error {
 					err = block.Download(ctx, cg.logger, cg.bkt, meta.ULID, bdir, objstore.WithFetchConcurrency(cg.blockFilesConcurrency))
 					return err
