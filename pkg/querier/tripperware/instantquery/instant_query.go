@@ -184,12 +184,20 @@ func (instantQueryCodec) EncodeRequest(ctx context.Context, r tripperware.Reques
 		RawQuery: params.Encode(),
 	}
 
+	var h = http.Header{}
+
+	for n, hv := range promReq.Headers {
+		for _, v := range hv {
+			h.Add(n, v)
+		}
+	}
+
 	req := &http.Request{
 		Method:     "GET",
 		RequestURI: u.String(), // This is what the httpgrpc code looks at.
 		URL:        u,
 		Body:       http.NoBody,
-		Header:     promReq.Headers,
+		Header:     h,
 	}
 
 	return req.WithContext(ctx), nil
