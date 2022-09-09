@@ -5,16 +5,16 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strconv"
 	"testing"
 
-	"github.com/cortexproject/cortex/pkg/querier/tripperware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/user"
+
+	"github.com/cortexproject/cortex/pkg/querier/tripperware"
 )
 
 func TestRequest(t *testing.T) {
@@ -210,7 +210,7 @@ func TestMergeResponse(t *testing.T) {
 			}
 			dr, err := InstantQueryCodec.EncodeResponse(context.Background(), resp)
 			assert.Equal(t, err, tc.expectedErr)
-			contents, err := ioutil.ReadAll(dr.Body)
+			contents, err := io.ReadAll(dr.Body)
 			assert.Equal(t, err, tc.expectedErr)
 			assert.Equal(t, string(contents), tc.expectedResp)
 		})

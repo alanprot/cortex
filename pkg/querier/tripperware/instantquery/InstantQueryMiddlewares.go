@@ -3,8 +3,9 @@ package instantquery
 import (
 	"flag"
 
-	"github.com/cortexproject/cortex/pkg/querier/tripperware"
 	"github.com/go-kit/log"
+
+	"github.com/cortexproject/cortex/pkg/querier/tripperware"
 )
 
 // Config for query_range middleware chain.

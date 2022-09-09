@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -271,7 +271,8 @@ http_requests_total`,
 								if matcher.Name == querysharding.CortexShardByLabel {
 
 									decoded, _ := base64.StdEncoding.DecodeString(matcher.Value)
-									shardInfo.Unmarshal(decoded)
+									err := shardInfo.Unmarshal(decoded)
+									require.NoError(t, err)
 								}
 							}
 						}
@@ -305,7 +306,7 @@ http_requests_total`,
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 
-			contents, err := ioutil.ReadAll(resp.Body)
+			contents, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 			require.Equal(t, tt.response, string(contents))
 		})
