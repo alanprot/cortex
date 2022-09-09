@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/cortexproject/cortex/pkg/querier/tripperware/instantquery"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
@@ -107,6 +108,7 @@ type Config struct {
 	Worker           querier_worker.Config           `yaml:"frontend_worker"`
 	Frontend         frontend.CombinedFrontendConfig `yaml:"frontend"`
 	QueryRange       queryrange.Config               `yaml:"query_range"`
+	Query            instantquery.Config             `yaml:"query"`
 	BlocksStorage    tsdb.BlocksStorageConfig        `yaml:"blocks_storage"`
 	Compactor        compactor.Config                `yaml:"compactor"`
 	StoreGateway     storegateway.Config             `yaml:"store_gateway"`
@@ -153,6 +155,7 @@ func (c *Config) RegisterFlags(f *flag.FlagSet) {
 	c.Worker.RegisterFlags(f)
 	c.Frontend.RegisterFlags(f)
 	c.QueryRange.RegisterFlags(f)
+	c.Query.RegisterFlags(f)
 	c.BlocksStorage.RegisterFlags(f)
 	c.Compactor.RegisterFlags(f)
 	c.StoreGateway.RegisterFlags(f)

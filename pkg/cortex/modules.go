@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/cortexproject/cortex/pkg/querier/tripperware/instantquery"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/opentracing-contrib/go-stdlib/nethttp"
@@ -435,15 +436,20 @@ func (t *Cortex) initDeleteRequestsStore() (serv services.Service, err error) {
 // initQueryFrontendTripperware instantiates the tripperware used by the query frontend
 // to optimize Prometheus query requests.
 func (t *Cortex) initQueryFrontendTripperware() (serv services.Service, err error) {
+	t.Cfg.QueryRange.VerticalShardSize = t.Cfg.Query.VerticalShardSize
 	queryRangeMiddlewares, cache, err := queryrange.Middlewares(
 		t.Cfg.QueryRange,
 		util_log.Logger,
 		t.Overrides,
-		queryrange.PrometheusCodec,
 		queryrange.PrometheusResponseExtractor{},
 		prometheus.DefaultRegisterer,
 		t.TombstonesLoader,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	instantQueryMiddlewares, err := instantquery.Middlewares(t.Cfg.Query, util_log.Logger, t.Overrides)
 
 	if err != nil {
 		return nil, err
@@ -453,7 +459,9 @@ func (t *Cortex) initQueryFrontendTripperware() (serv services.Service, err erro
 		prometheus.DefaultRegisterer,
 		t.Cfg.QueryRange.ForwardHeaders,
 		queryRangeMiddlewares,
+		instantQueryMiddlewares,
 		queryrange.PrometheusCodec,
+		instantquery.InstantQueryCodec,
 	)
 
 	return services.NewIdleService(nil, func(_ error) error {
