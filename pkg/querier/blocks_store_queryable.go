@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cortexproject/cortex/pkg/prom1/storage/metric"
+	"github.com/prometheus/common/model"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -322,8 +324,72 @@ type blocksStoreQuerier struct {
 
 // Select implements storage.Querier interface.
 // The bool passed is ignored because the series is always sorted.
-func (q *blocksStoreQuerier) Select(_ bool, sp *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	return q.selectSorted(sp, matchers...)
+func (q *blocksStoreQuerier) Select(sorted bool, sp *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
+	spanLog, spanCtx := spanlogger.New(q.ctx, "blocksStoreQuerier.selectSorted")
+	defer spanLog.Span.Finish()
+
+	minT, maxT := q.minT, q.maxT
+	if sp != nil {
+		minT, maxT = sp.Start, sp.End
+	}
+
+	var (
+		resSeriesSets = []storage.SeriesSet(nil)
+		resWarnings   = storage.Warnings(nil)
+
+		maxChunksLimit  = q.limits.MaxChunksPerQueryFromStore(q.userID)
+		leftChunksLimit = maxChunksLimit
+
+		resultMtx sync.Mutex
+	)
+
+	queryFunc := func(clients map[BlocksStoreClient][]ulid.ULID, minT, maxT int64) ([]ulid.ULID, error) {
+		var (
+			seriesSets    []storage.SeriesSet
+			queriedBlocks []ulid.ULID
+			warnings      storage.Warnings
+			numChunks     int
+			err           error
+		)
+		skipChunks := sp != nil && sp.Func == "series"
+		if skipChunks {
+			seriesSets, queriedBlocks, warnings, err = q.fetchSeriesFromStores(spanCtx, sorted, clients, minT, maxT, matchers)
+		} else {
+			seriesSets, queriedBlocks, warnings, numChunks, err = q.fetchSeriesAndChunksFromStores(spanCtx, sp, clients, minT, maxT, matchers, maxChunksLimit, leftChunksLimit)
+		}
+
+		if err != nil {
+
+			return nil, err
+		}
+
+		resultMtx.Lock()
+
+		resSeriesSets = append(resSeriesSets, seriesSets...)
+		resWarnings = append(resWarnings, warnings...)
+
+		// Given a single block is guaranteed to not be queried twice, we can safely decrease the number of
+		// chunks we can still read before hitting the limit (max == 0 means disabled).
+		if maxChunksLimit > 0 {
+			leftChunksLimit -= numChunks
+		}
+		resultMtx.Unlock()
+
+		return queriedBlocks, nil
+	}
+
+	err := q.queryWithConsistencyCheck(spanCtx, spanLog, minT, maxT, queryFunc)
+	if err != nil {
+		return storage.ErrSeriesSet(err)
+	}
+
+	if len(resSeriesSets) == 0 {
+		storage.EmptySeriesSet()
+	}
+
+	return series.NewSeriesSetWithWarnings(
+		storage.NewMergeSeriesSet(resSeriesSets, storage.ChainedSeriesMerge),
+		resWarnings)
 }
 
 func (q *blocksStoreQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
@@ -398,61 +464,6 @@ func (q *blocksStoreQuerier) LabelValues(name string, matchers ...*labels.Matche
 
 func (q *blocksStoreQuerier) Close() error {
 	return nil
-}
-
-func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	spanLog, spanCtx := spanlogger.New(q.ctx, "blocksStoreQuerier.selectSorted")
-	defer spanLog.Span.Finish()
-
-	minT, maxT := q.minT, q.maxT
-	if sp != nil {
-		minT, maxT = sp.Start, sp.End
-	}
-
-	var (
-		resSeriesSets = []storage.SeriesSet(nil)
-		resWarnings   = storage.Warnings(nil)
-
-		maxChunksLimit  = q.limits.MaxChunksPerQueryFromStore(q.userID)
-		leftChunksLimit = maxChunksLimit
-
-		resultMtx sync.Mutex
-	)
-
-	queryFunc := func(clients map[BlocksStoreClient][]ulid.ULID, minT, maxT int64) ([]ulid.ULID, error) {
-		seriesSets, queriedBlocks, warnings, numChunks, err := q.fetchSeriesFromStores(spanCtx, sp, clients, minT, maxT, matchers, maxChunksLimit, leftChunksLimit)
-		if err != nil {
-
-			return nil, err
-		}
-
-		resultMtx.Lock()
-
-		resSeriesSets = append(resSeriesSets, seriesSets...)
-		resWarnings = append(resWarnings, warnings...)
-
-		// Given a single block is guaranteed to not be queried twice, we can safely decrease the number of
-		// chunks we can still read before hitting the limit (max == 0 means disabled).
-		if maxChunksLimit > 0 {
-			leftChunksLimit -= numChunks
-		}
-		resultMtx.Unlock()
-
-		return queriedBlocks, nil
-	}
-
-	err := q.queryWithConsistencyCheck(spanCtx, spanLog, minT, maxT, queryFunc)
-	if err != nil {
-		return storage.ErrSeriesSet(err)
-	}
-
-	if len(resSeriesSets) == 0 {
-		storage.EmptySeriesSet()
-	}
-
-	return series.NewSeriesSetWithWarnings(
-		storage.NewMergeSeriesSet(resSeriesSets, storage.ChainedSeriesMerge),
-		resWarnings)
 }
 
 func (q *blocksStoreQuerier) queryWithConsistencyCheck(ctx context.Context, logger log.Logger, minT, maxT int64,
@@ -555,7 +566,7 @@ func (q *blocksStoreQuerier) queryWithConsistencyCheck(ctx context.Context, logg
 	return fmt.Errorf("consistency check failed because some blocks were not queried: %s", strings.Join(convertULIDsToString(remainingBlocks), " "))
 }
 
-func (q *blocksStoreQuerier) fetchSeriesFromStores(
+func (q *blocksStoreQuerier) fetchSeriesAndChunksFromStores(
 	ctx context.Context,
 	sp *storage.SelectHints,
 	clients map[BlocksStoreClient][]ulid.ULID,
@@ -722,6 +733,149 @@ func (q *blocksStoreQuerier) fetchSeriesFromStores(
 	}
 
 	return seriesSets, queriedBlocks, warnings, int(numChunks.Load()), nil
+}
+
+func (q *blocksStoreQuerier) fetchSeriesFromStores(
+	ctx context.Context,
+	sorted bool,
+	clients map[BlocksStoreClient][]ulid.ULID,
+	minT int64,
+	maxT int64,
+	matchers []*labels.Matcher,
+) ([]storage.SeriesSet, []ulid.ULID, storage.Warnings, error) {
+	var (
+		reqCtx           = grpc_metadata.AppendToOutgoingContext(ctx, cortex_tsdb.TenantIDExternalLabel, q.userID)
+		g, gCtx          = errgroup.WithContext(reqCtx)
+		metrics          = map[model.Fingerprint]model.Metric{}
+		warnings         = storage.Warnings(nil)
+		queriedBlocks    = []ulid.ULID(nil)
+		spanLog          = spanlogger.FromContext(ctx)
+		queryLimiter     = limiter.QueryLimiterFromContextWithFallback(ctx)
+		reqStats         = stats.FromContext(ctx)
+		respChan         = make(chan *storepb.SeriesResponse, 200)
+		fetchedDataBytes = 0
+	)
+	matchers, shardingInfo, err := querysharding.ExtractShardingInfo(matchers)
+
+	if err != nil {
+		return nil, nil, nil, err
+
+	}
+	convertedMatchers := convertMatchersToLabelMatcher(matchers)
+
+	// Concurrently fetch series from all clients.
+	for c, blockIDs := range clients {
+		// Change variables scope since it will be used in a goroutine.
+		c := c
+		blockIDs := blockIDs
+
+		g.Go(func() error {
+			req, err := createSeriesRequest(minT, maxT, convertedMatchers, shardingInfo, true, blockIDs)
+			if err != nil {
+				return errors.Wrapf(err, "failed to create series request")
+			}
+
+			stream, err := c.Series(gCtx, req)
+			if err != nil {
+				if isRetryableError(err) {
+					level.Warn(spanLog).Log("err", errors.Wrapf(err, "failed to fetch series from %s due to retryable error", c.RemoteAddress()))
+					return nil
+				}
+				return errors.Wrapf(err, "failed to fetch series from %s", c.RemoteAddress())
+			}
+
+			for {
+				// Ensure the context hasn't been canceled in the meanwhile (eg. an error occurred
+				// in another goroutine).
+				if gCtx.Err() != nil {
+					return gCtx.Err()
+				}
+
+				resp, err := stream.Recv()
+				if err == io.EOF {
+					break
+				}
+
+				if isRetryableError(err) {
+					level.Warn(spanLog).Log("err", errors.Wrapf(err, "failed to receive series from %s due to retryable error", c.RemoteAddress()))
+					return nil
+				}
+
+				if err != nil {
+					return errors.Wrapf(err, "failed to receive series from %s", c.RemoteAddress())
+				}
+				respChan <- resp
+			}
+			return nil
+		})
+	}
+
+out:
+	for {
+		select {
+		case resp, ok := <-respChan:
+			if !ok {
+				break out
+			}
+			// Response may either contain series, warning or hints.
+			if s := resp.GetSeries(); s != nil {
+				sl := cortexpb.FromLabelsToLabelAdapters(s.PromLabels())
+				m := cortexpb.FromLabelAdaptersToMetricWithCopy(sl)
+
+				fingerprint := m.Fingerprint()
+				metrics[fingerprint] = m
+
+				// Add series fingerprint to query limiter; will return error if we are over the limit
+				limitErr := queryLimiter.AddSeries(sl)
+				if limitErr != nil {
+					return nil, nil, nil, validation.LimitError(limitErr.Error())
+				}
+
+				size := countDataBytes(s)
+
+				if dataBytesLimitErr := queryLimiter.AddDataBytes(size); dataBytesLimitErr != nil {
+					return nil, nil, nil, validation.LimitError(dataBytesLimitErr.Error())
+				}
+
+				fetchedDataBytes += size
+			}
+
+			if w := resp.GetWarning(); w != "" {
+				warnings = append(warnings, errors.New(w))
+			}
+
+			if h := resp.GetHints(); h != nil {
+				hints := hintspb.SeriesResponseHints{}
+				if err := types.UnmarshalAny(h, &hints); err != nil {
+					return nil, nil, nil, errors.Wrapf(err, "failed to unmarshal series hints")
+				}
+
+				ids, err := convertBlockHintsToULIDs(hints.QueriedBlocks)
+				if err != nil {
+					return nil, nil, nil, errors.Wrapf(err, "failed to parse queried block IDs from received hints")
+				}
+
+				queriedBlocks = append(queriedBlocks, ids...)
+			}
+		case <-gCtx.Done():
+			if err := g.Wait(); err != nil {
+				return nil, nil, nil, err
+			}
+			close(respChan)
+		}
+	}
+
+	reqStats.AddFetchedSeries(uint64(len(metrics)))
+	reqStats.AddFetchedDataBytes(uint64(fetchedDataBytes))
+
+	result := make([]metric.Metric, 0, len(metrics))
+	for _, m := range metrics {
+		result = append(result, metric.Metric{
+			Metric: m,
+		})
+	}
+
+	return []storage.SeriesSet{series.MetricsToSeriesSet(sorted, result)}, queriedBlocks, warnings, nil
 }
 
 func (q *blocksStoreQuerier) fetchLabelNamesFromStore(
