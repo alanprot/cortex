@@ -10,7 +10,7 @@ option (gogoproto.marshaler_all) = true;
 option (gogoproto.unmarshaler_all) = true;
 
 message WriteRequest {
-  repeated TimeSeries timeseries = 1 [(gogoproto.nullable) = false, (gogoproto.customtype) = "PreallocTimeseries"];
+  repeated TimeSeries timeseries = 1 [(gogoproto.nullable) = true, (gogoproto.customtype) = "PreallocTimeseries"];
   enum SourceEnum {
     API = 0;
     RULE = 1;

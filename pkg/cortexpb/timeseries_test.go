@@ -64,3 +64,33 @@ func TestTimeseriesFromPool(t *testing.T) {
 		assert.Len(t, reused.Samples, 0)
 	})
 }
+
+func TestPreallocMasr(t *testing.T) {
+	ts := PreallocTimeseries{TimeSeries: &TimeSeries{
+		Labels: []LabelAdapter{
+			{
+				Name:  "test",
+				Value: "testValue",
+			},
+		},
+		Samples:   []Sample{},
+		Exemplars: []Exemplar{},
+	}}
+
+	b := make([]byte, 0, ts.Size())
+	_, err := ts.MarshalTo(b)
+	require.NoError(t, err)
+
+	ts.Unmarshal(b)
+
+	req := WriteRequest{
+		Timeseries: []PreallocTimeseries{ts},
+	}
+
+	b, err = req.Marshal()
+
+	require.NoError(t, err)
+
+	req.Unmarshal(b)
+
+}

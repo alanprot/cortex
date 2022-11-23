@@ -503,49 +503,35 @@ func (d *Distributor) checkSample(ctx context.Context, userID, cluster, replica 
 // any are configured to be dropped for the user ID.
 // Returns the validated series with it's labels/samples, and any error.
 // The returned error may retain the series labels.
-func (d *Distributor) validateSeries(ts cortexpb.PreallocTimeseries, userID string, skipLabelNameValidation bool, limits *validation.Limits) (cortexpb.PreallocTimeseries, validation.ValidationError) {
+func (d *Distributor) validateSeries(ts *cortexpb.PreallocTimeseries, userID string, skipLabelNameValidation bool, limits *validation.Limits) (*cortexpb.PreallocTimeseries, validation.ValidationError) {
 	d.labelsHistogram.Observe(float64(len(ts.Labels)))
 
 	if err := validation.ValidateLabels(limits, userID, ts.Labels, skipLabelNameValidation); err != nil {
-		return emptyPreallocSeries, err
+		return &emptyPreallocSeries, err
 	}
 
-	var samples []cortexpb.Sample
 	if len(ts.Samples) > 0 {
 		// Only alloc when data present
-		samples = make([]cortexpb.Sample, 0, len(ts.Samples))
 		for _, s := range ts.Samples {
 			if err := validation.ValidateSample(limits, userID, ts.Labels, s); err != nil {
-				return emptyPreallocSeries, err
+				return &emptyPreallocSeries, err
 			}
-			samples = append(samples, s)
 		}
 	}
 
-	var exemplars []cortexpb.Exemplar
 	if len(ts.Exemplars) > 0 {
-		// Only alloc when data present
-		exemplars = make([]cortexpb.Exemplar, 0, len(ts.Exemplars))
 		for _, e := range ts.Exemplars {
 			if err := validation.ValidateExemplar(userID, ts.Labels, e); err != nil {
 				// An exemplar validation error prevents ingesting samples
 				// in the same series object. However because the current Prometheus
 				// remote write implementation only populates one or the other,
 				// there never will be any.
-				return emptyPreallocSeries, err
+				return &emptyPreallocSeries, err
 			}
-			exemplars = append(exemplars, e)
 		}
 	}
 
-	return cortexpb.PreallocTimeseries{
-			TimeSeries: &cortexpb.TimeSeries{
-				Labels:    ts.Labels,
-				Samples:   samples,
-				Exemplars: exemplars,
-			},
-		},
-		nil
+	return ts, nil
 }
 
 // Push implements client.IngesterServer
@@ -592,7 +578,7 @@ func (d *Distributor) Push(ctx context.Context, req *cortexpb.WriteRequest) (*co
 	// A WriteRequest can only contain series or metadata but not both. This might change in the future.
 	// For each timeseries or samples, we compute a hash to distribute across ingesters;
 	// check each sample/metadata and discard if outside limits.
-	validatedTimeseries := make([]cortexpb.PreallocTimeseries, 0, len(req.Timeseries))
+	validatedTimeseries := make([]*cortexpb.PreallocTimeseries, 0, len(req.Timeseries))
 	validatedMetadata := make([]*cortexpb.MetricMetadata, 0, len(req.Metadata))
 	metadataKeys := make([]uint32, 0, len(req.Metadata))
 	seriesKeys := make([]uint32, 0, len(req.Timeseries))
@@ -703,7 +689,7 @@ func (d *Distributor) Push(ctx context.Context, req *cortexpb.WriteRequest) (*co
 		}
 
 		// validateSeries would have returned an emptyPreallocSeries if there were no valid samples.
-		if validatedSeries == emptyPreallocSeries {
+		if validatedSeries.TimeSeries == emptyPreallocSeries.TimeSeries {
 			continue
 		}
 
@@ -772,7 +758,7 @@ func (d *Distributor) Push(ctx context.Context, req *cortexpb.WriteRequest) (*co
 	}
 
 	err = ring.DoBatch(ctx, op, subRing, keys, func(ingester ring.InstanceDesc, indexes []int) error {
-		timeseries := make([]cortexpb.PreallocTimeseries, 0, len(indexes))
+		timeseries := make([]*cortexpb.PreallocTimeseries, 0, len(indexes))
 		var metadata []*cortexpb.MetricMetadata
 
 		for _, i := range indexes {
@@ -828,7 +814,7 @@ func sortLabelsIfNeeded(labels []cortexpb.LabelAdapter) {
 	})
 }
 
-func (d *Distributor) send(ctx context.Context, ingester ring.InstanceDesc, timeseries []cortexpb.PreallocTimeseries, metadata []*cortexpb.MetricMetadata, source cortexpb.WriteRequest_SourceEnum) error {
+func (d *Distributor) send(ctx context.Context, ingester ring.InstanceDesc, timeseries []*cortexpb.PreallocTimeseries, metadata []*cortexpb.MetricMetadata, source cortexpb.WriteRequest_SourceEnum) error {
 	h, err := d.ingesterPool.GetClientFor(ingester.Addr)
 	if err != nil {
 		return err

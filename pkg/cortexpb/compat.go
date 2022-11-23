@@ -32,7 +32,7 @@ func ToWriteRequest(lbls []labels.Labels, samples []Sample, metadata []*MetricMe
 		ts := TimeseriesFromPool()
 		ts.Labels = append(ts.Labels, FromLabelsToLabelAdapters(lbls[i])...)
 		ts.Samples = append(ts.Samples, s)
-		req.Timeseries = append(req.Timeseries, PreallocTimeseries{TimeSeries: ts})
+		req.Timeseries = append(req.Timeseries, &PreallocTimeseries{TimeSeries: ts})
 	}
 
 	return req

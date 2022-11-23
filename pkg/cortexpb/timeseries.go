@@ -24,7 +24,7 @@ var (
 	*/
 	slicePool = sync.Pool{
 		New: func() interface{} {
-			return make([]PreallocTimeseries, 0, expectedTimeseries)
+			return make([]*PreallocTimeseries, 0, expectedTimeseries)
 		},
 	}
 
@@ -64,12 +64,22 @@ func (p *PreallocWriteRequest) Unmarshal(dAtA []byte) error {
 // PreallocTimeseries is a TimeSeries which preallocs slices on Unmarshal.
 type PreallocTimeseries struct {
 	*TimeSeries
+	dAtA []byte
 }
 
 // Unmarshal implements proto.Message.
 func (p *PreallocTimeseries) Unmarshal(dAtA []byte) error {
 	p.TimeSeries = TimeseriesFromPool()
 	return p.TimeSeries.Unmarshal(dAtA)
+}
+
+func (p *PreallocTimeseries) MarshalTo(dAtA []byte) (int, error) {
+	if len(p.dAtA) == 0 {
+		i, err := p.TimeSeries.MarshalTo(dAtA)
+		p.dAtA = dAtA
+		return i, err
+	}
+	return copy(dAtA[:p.Size()], p.dAtA), nil
 }
 
 // LabelAdapter is a labels.Label that can be marshalled to/from protos.
@@ -269,13 +279,14 @@ func (bs *LabelAdapter) Compare(other LabelAdapter) int {
 
 // PreallocTimeseriesSliceFromPool retrieves a slice of PreallocTimeseries from a sync.Pool.
 // ReuseSlice should be called once done.
-func PreallocTimeseriesSliceFromPool() []PreallocTimeseries {
-	return slicePool.Get().([]PreallocTimeseries)
+func PreallocTimeseriesSliceFromPool() []*PreallocTimeseries {
+	return slicePool.Get().([]*PreallocTimeseries)
 }
 
 // ReuseSlice puts the slice back into a sync.Pool for reuse.
-func ReuseSlice(ts []PreallocTimeseries) {
+func ReuseSlice(ts []*PreallocTimeseries) {
 	for i := range ts {
+		ts[i].dAtA = nil
 		ReuseTimeseries(ts[i].TimeSeries)
 	}
 
