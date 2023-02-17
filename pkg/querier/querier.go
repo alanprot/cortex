@@ -30,6 +30,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/querier/lazyquery"
 	"github.com/cortexproject/cortex/pkg/querier/series"
 	seriesset "github.com/cortexproject/cortex/pkg/querier/series"
+	"github.com/cortexproject/cortex/pkg/querier/stats"
 	"github.com/cortexproject/cortex/pkg/tenant"
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/flagext"
@@ -311,7 +312,14 @@ type querier struct {
 // The bool passed is ignored because the series is always sorted.
 func (q querier) Select(sortSeries bool, sp *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
 	log, ctx := spanlogger.New(q.ctx, "querier.Select")
-	defer log.Span.Finish()
+	defer func() {
+		if stats := stats.FromContext(q.ctx); stats != nil {
+			log.Span.SetTag("fetched_series_count", stats.FetchedSeriesCount)
+			log.Span.SetTag("fetched_chunks_bytes", stats.FetchedChunkBytes)
+			log.Span.SetTag("fetched_data_bytes", stats.FetchedDataBytes)
+		}
+		log.Span.Finish()
+	}()
 
 	if sp != nil {
 		level.Debug(log).Log("start", util.TimeFromMillis(sp.Start).UTC().String(), "end", util.TimeFromMillis(sp.End).UTC().String(), "step", sp.Step, "matchers", matchers)
