@@ -18,6 +18,12 @@ var (
 	errMultipleDocuments = errors.New("the provided runtime configuration contains multiple documents")
 )
 
+type runtimeAllowedTenantConfig struct {
+	alertManager *util.AllowedTenantConfig `yaml:"alert_manager"`
+	compactor    *util.AllowedTenantConfig `yaml:"compactor"`
+	ruler        *util.AllowedTenantConfig `yaml:"ruler"`
+}
+
 // runtimeConfigValues are values that can be reloaded from configuration file while Cortex is running.
 // Reloading is done by runtime_config.Manager, which also keeps the currently loaded config.
 // These values are then pushed to the components that are interested in them.
@@ -26,9 +32,9 @@ type runtimeConfigValues struct {
 
 	Multi kv.MultiRuntimeConfig `yaml:"multi_kv_config"`
 
-	IngesterChunkStreaming *bool `yaml:"ingester_stream_chunks_when_using_blocks"`
-
 	IngesterLimits *ingester.InstanceLimits `yaml:"ingester_limits"`
+
+	AllowedTenantConfig runtimeAllowedTenantConfig `yaml:"allowed_tenant"`
 }
 
 // runtimeConfigTenantLimits provides per-tenant limit overrides based on a runtimeconfig.Manager
@@ -113,6 +119,48 @@ func ingesterInstanceLimits(manager *runtimeconfig.Manager) func() *ingester.Ins
 		val := manager.GetConfig()
 		if cfg, ok := val.(*runtimeConfigValues); ok && cfg != nil {
 			return cfg.IngesterLimits
+		}
+		return nil
+	}
+}
+
+func alertManagerAllowedTenant(manager *runtimeconfig.Manager) func() *util.AllowedTenantConfig {
+	if manager == nil {
+		return nil
+	}
+
+	return func() *util.AllowedTenantConfig {
+		val := manager.GetConfig()
+		if cfg, ok := val.(*runtimeConfigValues); ok && cfg != nil {
+			return cfg.AllowedTenantConfig.alertManager
+		}
+		return nil
+	}
+}
+
+func compactorAllowedTenant(manager *runtimeconfig.Manager) func() *util.AllowedTenantConfig {
+	if manager == nil {
+		return nil
+	}
+
+	return func() *util.AllowedTenantConfig {
+		val := manager.GetConfig()
+		if cfg, ok := val.(*runtimeConfigValues); ok && cfg != nil {
+			return cfg.AllowedTenantConfig.compactor
+		}
+		return nil
+	}
+}
+
+func rulerAllowedTenant(manager *runtimeconfig.Manager) func() *util.AllowedTenantConfig {
+	if manager == nil {
+		return nil
+	}
+
+	return func() *util.AllowedTenantConfig {
+		val := manager.GetConfig()
+		if cfg, ok := val.(*runtimeConfigValues); ok && cfg != nil {
+			return cfg.AllowedTenantConfig.ruler
 		}
 		return nil
 	}

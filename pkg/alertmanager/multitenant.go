@@ -86,8 +86,9 @@ type MultitenantAlertmanagerConfig struct {
 	// For the state persister.
 	Persister PersisterConfig `yaml:",inline"`
 
-	EnabledTenants  flagext.StringSliceCSV `yaml:"enabled_tenants"`
-	DisabledTenants flagext.StringSliceCSV `yaml:"disabled_tenants"`
+	util.AllowedTenantConfig `yaml:",inline"`
+
+	AllowedTenantConfigFn func() *util.AllowedTenantConfig `yaml:"-"`
 }
 
 type ClusterConfig struct {
@@ -366,7 +367,7 @@ func createMultitenantAlertmanager(cfg *MultitenantAlertmanagerConfig, fallbackC
 		logger:              log.With(logger, "component", "MultiTenantAlertmanager"),
 		registry:            registerer,
 		limits:              limits,
-		allowedTenants:      util.NewAllowedTenants(cfg.EnabledTenants, cfg.DisabledTenants),
+		allowedTenants:      util.NewAllowedTenants(cfg.AllowedTenantConfig, cfg.AllowedTenantConfigFn),
 		ringCheckErrors: promauto.With(registerer).NewCounter(prometheus.CounterOpts{
 			Name: "cortex_alertmanager_ring_check_errors_total",
 			Help: "Number of errors that have occurred when checking the ring for ownership.",
@@ -453,6 +454,10 @@ func (h *handlerForGRPCServer) ServeHTTP(w http.ResponseWriter, req *http.Reques
 }
 
 func (am *MultitenantAlertmanager) starting(ctx context.Context) (err error) {
+	if err := services.StartAndAwaitRunning(ctx, am.allowedTenants); err != nil {
+		return errors.Wrap(err, "failed to start allowed tenants service")
+	}
+
 	err = am.migrateStateFilesToPerTenantDirectories()
 	if err != nil {
 		return err
@@ -733,6 +738,7 @@ func (am *MultitenantAlertmanager) stopping(_ error) error {
 		// subservices manages ring and lifecycler, if sharding was enabled.
 		_ = services.StopManagerAndAwaitStopped(context.Background(), am.subservices)
 	}
+	services.StopAndAwaitTerminated(context.Background(), am.allowedTenants) //nolint:errcheck
 	return nil
 }
 

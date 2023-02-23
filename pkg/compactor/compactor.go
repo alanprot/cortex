@@ -30,7 +30,6 @@ import (
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/backoff"
-	"github.com/cortexproject/cortex/pkg/util/flagext"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/cortexproject/cortex/pkg/util/services"
 	"github.com/cortexproject/cortex/pkg/util/validation"
@@ -187,8 +186,9 @@ type Config struct {
 	// Whether the migration of block deletion marks to the global markers location is enabled.
 	BlockDeletionMarksMigrationEnabled bool `yaml:"block_deletion_marks_migration_enabled"`
 
-	EnabledTenants  flagext.StringSliceCSV `yaml:"enabled_tenants"`
-	DisabledTenants flagext.StringSliceCSV `yaml:"disabled_tenants"`
+	// Allowed TenantConfig
+	util.AllowedTenantConfig `yaml:",inline"`
+	AllowedTenantConfigFn    func() *util.AllowedTenantConfig `yaml:"-"`
 
 	// Compactors sharding.
 	ShardingEnabled  bool       `yaml:"sharding_enabled"`
@@ -396,7 +396,7 @@ func newCompactor(
 		bucketClientFactory:    bucketClientFactory,
 		blocksGrouperFactory:   blocksGrouperFactory,
 		blocksCompactorFactory: blocksCompactorFactory,
-		allowedTenants:         util.NewAllowedTenants(compactorCfg.EnabledTenants, compactorCfg.DisabledTenants),
+		allowedTenants:         util.NewAllowedTenants(compactorCfg.AllowedTenantConfig, compactorCfg.AllowedTenantConfigFn),
 
 		compactionRunsStarted: promauto.With(registerer).NewCounter(prometheus.CounterOpts{
 			Name: "cortex_compactor_runs_started_total",
@@ -481,6 +481,10 @@ func newCompactor(
 // Start the compactor.
 func (c *Compactor) starting(ctx context.Context) error {
 	var err error
+
+	if err := services.StartAndAwaitRunning(ctx, c.allowedTenants); err != nil {
+		return errors.Wrap(err, "failed to start allowed tenants service")
+	}
 
 	// Create bucket client.
 	c.bucketClient, err = c.bucketClientFactory(ctx)
@@ -578,7 +582,8 @@ func (c *Compactor) starting(ctx context.Context) error {
 func (c *Compactor) stopping(_ error) error {
 	ctx := context.Background()
 
-	services.StopAndAwaitTerminated(ctx, c.blocksCleaner) //nolint:errcheck
+	services.StopAndAwaitTerminated(ctx, c.blocksCleaner)  //nolint:errcheck
+	services.StopAndAwaitTerminated(ctx, c.allowedTenants) //nolint:errcheck
 	if c.ringSubservices != nil {
 		return services.StopManagerAndAwaitStopped(ctx, c.ringSubservices)
 	}
