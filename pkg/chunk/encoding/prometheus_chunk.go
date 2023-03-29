@@ -79,8 +79,9 @@ func (p *prometheusXorChunk) Len() int {
 }
 
 type prometheusChunkIterator struct {
-	c  chunkenc.Chunk // we need chunk, because FindAtOrAfter needs to start with fresh iterator.
-	it chunkenc.Iterator
+	c            chunkenc.Chunk // we need chunk, because FindAtOrAfter needs to start with fresh iterator.
+	it           chunkenc.Iterator
+	lastSampleTs int64
 }
 
 func (p *prometheusChunkIterator) Scan() bool {
@@ -107,6 +108,7 @@ func (p *prometheusChunkIterator) Batch(size int) Batch {
 	j := 0
 	for j < size {
 		t, v := p.it.At()
+		p.lastSampleTs = t
 		batch.Timestamps[j] = t
 		batch.Values[j] = v
 		j++
