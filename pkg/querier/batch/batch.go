@@ -42,6 +42,7 @@ type iterator interface {
 	// AtTime returns the start time of the next batch.  Must only be called after
 	// Seek or Next have returned true.
 	AtTime() int64
+	MaxTime() int64
 
 	// Batch returns the current batch.  Must only be called after Seek or Next
 	// have returned true.
@@ -98,6 +99,18 @@ func (a *iteratorAdapter) Seek(t int64) bool {
 				a.curr.Index++
 			}
 			return true
+		} else if t <= a.underlying.MaxTime() {
+			for a.underlying.Next(promchunk.BatchSize) {
+				a.curr = a.underlying.Batch()
+				if t <= a.curr.Timestamps[a.curr.Length-1] {
+					//In this case, some timestamp between current sample and end of batch can fulfill
+					//the seek. Let's find it.
+					for a.curr.Index < a.curr.Length && t > a.curr.Timestamps[a.curr.Index] {
+						a.curr.Index++
+					}
+					return true
+				}
+			}
 		}
 	}
 
