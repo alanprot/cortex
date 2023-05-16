@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cortexproject/cortex/pkg/cortexpb"
+	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/weaveworks/common/httpgrpc"
@@ -154,6 +156,84 @@ func TestGzippedResponse(t *testing.T) {
 			})
 		}
 	}
+}
+
+func Benchmark_GzipResponse(b *testing.B) {
+	maxSamplesCount := 1000000
+	samples := make([]tripperware.SampleStream, maxSamplesCount)
+
+	for i := 0; i < maxSamplesCount; i++ {
+		samples[i].Labels = append(samples[i].Labels, cortexpb.LabelAdapter{Name: fmt.Sprintf("Sample%v", i), Value: fmt.Sprintf("Value%v", i)})
+		samples[i].Labels = append(samples[i].Labels, cortexpb.LabelAdapter{Name: fmt.Sprintf("Sample2%v", i), Value: fmt.Sprintf("Value2%v", i)})
+		samples[i].Labels = append(samples[i].Labels, cortexpb.LabelAdapter{Name: fmt.Sprintf("Sample3%v", i), Value: fmt.Sprintf("Value3%v", i)})
+		samples[i].Samples = append(samples[i].Samples, cortexpb.Sample{TimestampMs: int64(i), Value: float64(i)})
+	}
+
+	makeResp := func(i int) *PrometheusInstantQueryResponse {
+		return &PrometheusInstantQueryResponse{
+			Data: PrometheusInstantQueryData{
+				ResultType: model.ValMatrix.String(),
+				Result: PrometheusInstantQueryResult{
+					Result: &PrometheusInstantQueryResult_Matrix{
+						Matrix: &Matrix{
+							SampleStreams: samples[:i],
+						},
+					},
+				},
+			},
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		resp *PrometheusInstantQueryResponse
+	}{
+		"100 samples": {
+			resp: makeResp(100),
+		},
+		"1000 samples": {
+			resp: makeResp(1000),
+		},
+		"10000 samples": {
+			resp: makeResp(10000),
+		},
+		"100000 samples": {
+			resp: makeResp(100000),
+		},
+		"1000000 samples": {
+			resp: makeResp(1000000),
+		},
+	} {
+		b.Run(name, func(b *testing.B) {
+			h := http.Header{
+				"Content-Type": []string{"application/json"},
+			}
+
+			body, err := json.Marshal(tc.resp)
+			require.NoError(b, err)
+
+			h.Set("Content-Encoding", "gzip")
+			var buf bytes.Buffer
+			w := gzip.NewWriter(&buf)
+			_, err = w.Write([]byte(body))
+			require.NoError(b, err)
+			w.Close()
+			responseBody := buf.Bytes()
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			for i := 0; i < b.N; i++ {
+				response := &http.Response{
+					StatusCode: 200,
+					Header:     h,
+					Body:       io.NopCloser(bytes.NewBuffer(responseBody)),
+				}
+				_, err := InstantQueryCodec.DecodeResponse(context.Background(), response, nil)
+				require.NoError(b, err)
+			}
+		})
+	}
+
 }
 
 func TestResponse(t *testing.T) {

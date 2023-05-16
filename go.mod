@@ -76,7 +76,10 @@ require (
 	sigs.k8s.io/yaml v1.3.0
 )
 
-require github.com/google/go-cmp v0.5.9
+require (
+	github.com/google/go-cmp v0.5.9
+	github.com/klauspost/pgzip v1.2.6
+)
 
 require (
 	cloud.google.com/go v0.110.0 // indirect

@@ -2,15 +2,18 @@ package tripperware
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/cortexproject/cortex/pkg/util/runutil"
+	"github.com/klauspost/pgzip"
 
 	"github.com/go-kit/log"
 	"github.com/gogo/protobuf/proto"
@@ -21,7 +24,6 @@ import (
 	"github.com/weaveworks/common/httpgrpc"
 
 	"github.com/cortexproject/cortex/pkg/cortexpb"
-	"github.com/cortexproject/cortex/pkg/util/runutil"
 )
 
 var (
@@ -30,6 +32,8 @@ var (
 		SortMapKeys:            true,
 		ValidateJsonRawMessage: false,
 	}.Froze()
+
+	gzReaderPool = sync.Pool{}
 )
 
 // Codec is used to encode/decode query range requests and responses so they can be passed down to middlewares.
@@ -193,11 +197,19 @@ func BodyBuffer(res *http.Response, logger log.Logger) ([]byte, error) {
 
 	// if the response is gziped, lets unzip it here
 	if strings.EqualFold(res.Header.Get("Content-Encoding"), "gzip") {
-		gReader, err := gzip.NewReader(buf)
+		gReader, ok := gzReaderPool.Get().(*pgzip.Reader)
+		var err error
+		if ok {
+			err = gReader.Reset(buf)
+		} else {
+			gReader, err = pgzip.NewReader(buf)
+		}
 		if err != nil {
 			return nil, err
 		}
-		defer runutil.CloseWithLogOnErr(logger, gReader, "close gzip reader")
+
+		defer gzReaderPool.Put(gReader)
+		defer runutil.CloseWithLogOnErr(logger, res.Body, "close gzip reader")
 
 		return io.ReadAll(gReader)
 	}
