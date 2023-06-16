@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cortexproject/cortex/pkg/util/validation"
 	"github.com/go-kit/log"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
@@ -61,6 +62,10 @@ func (f *BucketIndexBlocksFinder) GetBlocks(ctx context.Context, userID string, 
 		// This is a legit edge case, happening when a new tenant has not shipped blocks to the storage yet
 		// so the bucket index hasn't been created yet.
 		return nil, nil, nil
+	}
+
+	if errors.Is(err, bucketindex.ErrKeyAccessDeniedErr) {
+		return nil, nil, validation.AccessDeniedError(err.Error())
 	}
 	if err != nil {
 		return nil, nil, err

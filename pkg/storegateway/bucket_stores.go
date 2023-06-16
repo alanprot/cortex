@@ -92,7 +92,7 @@ func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStra
 		logger:             logger,
 		cfg:                cfg,
 		limits:             limits,
-		bucket:             cachingBucket,
+		bucket:             bucket.NewWrappedBucket(bucketClient, cachingBucket),
 		shardingStrategy:   shardingStrategy,
 		stores:             map[string]*store.BucketStore{},
 		logLevel:           logLevel,

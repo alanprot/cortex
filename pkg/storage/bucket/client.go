@@ -42,6 +42,12 @@ var (
 	ErrUnsupportedStorageBackend = errors.New("unsupported storage backend")
 )
 
+type SSEBucket interface {
+	objstore.Bucket
+	IsKeyAccessDeniedErr(err error) bool
+	IsObjNotFoundOrKeyAccessDeniedErr(err error) bool
+}
+
 // Config holds configuration for accessing long-term storage.
 type Config struct {
 	Backend string `yaml:"backend"`
@@ -120,7 +126,7 @@ func NewClient(ctx context.Context, cfg Config, name string, logger log.Logger, 
 		return nil, err
 	}
 
-	client = objstore.NewTracingBucket(bucketWithMetrics(client, name, reg))
+	client = NewWrappedBucket(client, objstore.NewTracingBucket(bucketWithMetrics(client, name, reg)))
 
 	// Wrap the client with any provided middleware
 	for _, wrap := range cfg.Middlewares {
@@ -133,6 +139,13 @@ func NewClient(ctx context.Context, cfg Config, name string, logger log.Logger, 
 	return client, nil
 }
 
+func NewWrappedBucket(w, b objstore.Bucket) SSEBucket {
+	return &wrappedSSEBucket{
+		Bucket:  b,
+		wrapped: w,
+	}
+}
+
 func bucketWithMetrics(bucketClient objstore.Bucket, name string, reg prometheus.Registerer) objstore.Bucket {
 	if reg == nil {
 		return bucketClient
@@ -142,4 +155,23 @@ func bucketWithMetrics(bucketClient objstore.Bucket, name string, reg prometheus
 		"", // bucket label value
 		bucketClient,
 		prometheus.WrapRegistererWith(prometheus.Labels{"component": name}, reg))
+}
+
+type wrappedSSEBucket struct {
+	objstore.Bucket
+	wrapped objstore.Bucket
+}
+
+func (w *wrappedSSEBucket) IsObjNotFoundOrKeyAccessDeniedErr(err error) bool {
+	if sseBucket, ok := w.wrapped.(SSEBucket); ok {
+		return sseBucket.IsObjNotFoundOrKeyAccessDeniedErr(err)
+	}
+	return false
+}
+
+func (w *wrappedSSEBucket) IsKeyAccessDeniedErr(err error) bool {
+	if sseBucket, ok := w.wrapped.(SSEBucket); ok {
+		return sseBucket.IsKeyAccessDeniedErr(err)
+	}
+	return false
 }

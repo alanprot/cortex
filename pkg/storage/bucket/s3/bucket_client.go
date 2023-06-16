@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"github.com/minio/minio-go/v7"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/objstore/providers/s3"
@@ -103,6 +105,15 @@ type BucketWithRetries struct {
 	retryMaxBackoff  time.Duration
 }
 
+func (b *BucketWithRetries) IsKeyAccessDeniedErr(err error) bool {
+	errResponse := minio.ToErrorResponse(errors.Cause(err))
+	return errResponse.Code == "AccessDenied" && errResponse.Message == "The ciphertext refers to a customer master key that does not exist, does not exist in this region, or you are not allowed to access."
+}
+
+func (b *BucketWithRetries) IsObjNotFoundOrKeyAccessDeniedErr(err error) bool {
+	return b.IsKeyAccessDeniedErr(err) || b.IsObjNotFoundErr(err)
+}
+
 func (b *BucketWithRetries) retry(ctx context.Context, f func() error, operationInfo string) error {
 	var lastErr error
 	retries := backoff.New(ctx, backoff.Config{
@@ -115,7 +126,7 @@ func (b *BucketWithRetries) retry(ctx context.Context, f func() error, operation
 		if lastErr == nil {
 			return nil
 		}
-		if b.bucket.IsObjNotFoundErr(lastErr) {
+		if b.IsObjNotFoundOrKeyAccessDeniedErr(lastErr) {
 			return lastErr
 		}
 		retries.Wait()

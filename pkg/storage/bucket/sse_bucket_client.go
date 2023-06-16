@@ -4,12 +4,11 @@ import (
 	"context"
 	"io"
 
+	cortex_s3 "github.com/cortexproject/cortex/pkg/storage/bucket/s3"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/pkg/errors"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/objstore/providers/s3"
-
-	cortex_s3 "github.com/cortexproject/cortex/pkg/storage/bucket/s3"
 )
 
 // TenantConfigProvider defines a per-tenant config provider.
@@ -140,4 +139,18 @@ func (b *SSEBucketClient) WithExpectedErrs(fn objstore.IsOpFailureExpectedFunc) 
 	}
 
 	return b
+}
+
+func (b *SSEBucketClient) IsKeyAccessDeniedErr(err error) bool {
+	if sseBucket, ok := b.bucket.(SSEBucket); ok {
+		return sseBucket.IsKeyAccessDeniedErr(err)
+	}
+	return false
+}
+
+func (b *SSEBucketClient) IsObjNotFoundOrKeyAccessDeniedErr(err error) bool {
+	if sseBucket, ok := b.bucket.(SSEBucket); ok {
+		return sseBucket.IsObjNotFoundOrKeyAccessDeniedErr(err)
+	}
+	return false
 }

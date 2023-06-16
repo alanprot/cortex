@@ -184,7 +184,7 @@ func NewBlocksStoreQueryableFromConfig(querierCfg Config, gatewayCfg storegatewa
 	if err != nil {
 		return nil, errors.Wrap(err, "create caching bucket")
 	}
-	bucketClient = cachingBucket
+	bucketClient = bucket.NewWrappedBucket(bucketClient, cachingBucket)
 
 	// Create the blocks finder.
 	var finder BlocksFinder
