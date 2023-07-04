@@ -206,6 +206,11 @@ func (c *BlocksCleaner) deleteUserMarkedForDeletion(ctx context.Context, userID 
 	if err := bucketindex.DeleteIndex(ctx, c.bucketClient, userID, c.cfgProvider); err != nil {
 		return err
 	}
+
+	// Delete the bucket sync status
+	if err := bucketindex.DeleteIndexSyncStatus(ctx, c.bucketClient, userID); err != nil {
+		return err
+	}
 	c.tenantBucketIndexLastUpdate.DeleteLabelValues(userID)
 
 	var deletedBlocks, failed int
@@ -327,9 +332,11 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 		level.Warn(userLogger).Log("msg", "found a corrupted bucket index, recreating it")
 	} else if errors.Is(err, bucket.ErrCustomerManagedKeyAccessDenied) {
 		// Give up cleaning if we get access denied
-		level.Warn(userLogger).Log("msg", err.Error())
+		level.Warn(userLogger).Log("msg", "customer manager key access denied", "err", err)
+		bucketindex.WriteSyncStatus(ctx, c.bucketClient, userID, bucketindex.CustomerManagedKeyError, userLogger)
 		return nil
 	} else if err != nil && !errors.Is(err, bucketindex.ErrIndexNotFound) {
+		bucketindex.WriteSyncStatus(ctx, c.bucketClient, userID, bucketindex.GenericError, userLogger)
 		return err
 	}
 
@@ -348,6 +355,7 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 	w := bucketindex.NewUpdater(c.bucketClient, userID, c.cfgProvider, c.logger)
 	idx, partials, totalBlocksBlocksMarkedForNoCompaction, err := w.UpdateIndex(ctx, idx)
 	if err != nil {
+		bucketindex.WriteSyncStatus(ctx, c.bucketClient, userID, bucketindex.GenericError, userLogger)
 		return err
 	}
 
@@ -398,7 +406,7 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 	c.tenantBlocksMarkedForNoCompaction.WithLabelValues(userID).Set(float64(totalBlocksBlocksMarkedForNoCompaction))
 	c.tenantBucketIndexLastUpdate.WithLabelValues(userID).SetToCurrentTime()
 	c.tenantPartialBlocks.WithLabelValues(userID).Set(float64(len(partials)))
-
+	bucketindex.WriteSyncStatus(ctx, c.bucketClient, userID, bucketindex.Ok, userLogger)
 	return nil
 }
 

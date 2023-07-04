@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 
+	"github.com/cortexproject/cortex/pkg/storage/bucket"
+
 	"github.com/cortexproject/cortex/pkg/util/validation"
 
 	"github.com/cortexproject/cortex/pkg/storage/tsdb/bucketindex"
@@ -219,6 +221,28 @@ func TestBucketIndexBlocksFinder_GetBlocks_BucketIndexIsTooOld(t *testing.T) {
 
 	_, _, err := finder.GetBlocks(ctx, userID, 10, 20)
 	require.Equal(t, errBucketIndexTooOld, err)
+}
+
+func TestBucketIndexBlocksFinder_GetBlocks_BucketIndexIsTooOldWithCustomerKeyError(t *testing.T) {
+	t.Parallel()
+
+	const userID = "user-1"
+
+	ctx := context.Background()
+	bkt, _ := cortex_testutil.PrepareFilesystemBucket(t)
+	finder := prepareBucketIndexBlocksFinder(t, bkt)
+
+	require.NoError(t, bucketindex.WriteIndex(ctx, bkt, userID, nil, &bucketindex.Index{
+		Version:            bucketindex.IndexVersion1,
+		Blocks:             bucketindex.Blocks{},
+		BlockDeletionMarks: bucketindex.BlockDeletionMarks{},
+		UpdatedAt:          time.Now().Add(-2 * time.Hour).Unix(),
+	}))
+
+	bucketindex.WriteSyncStatus(ctx, bkt, userID, bucketindex.CustomerManagedKeyError, log.NewNopLogger())
+
+	_, _, err := finder.GetBlocks(ctx, userID, 10, 20)
+	require.Equal(t, validation.AccessDeniedError(bucket.ErrCustomerManagedKeyAccessDenied.Error()), err)
 }
 
 func prepareBucketIndexBlocksFinder(t testing.TB, bkt objstore.Bucket) *BucketIndexBlocksFinder {

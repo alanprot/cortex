@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestBlocksCleaner(t *testing.T) {
 func TestBlockCleaner_KeyPermissionDenied(t *testing.T) {
 	const userID = "user-1"
 
-	bucketClient, _ := cortex_testutil.PrepareFilesystemBucket(t)
+	bucketClient, dir := cortex_testutil.PrepareFilesystemBucket(t)
 	bucketClient = bucketindex.BucketWithGlobalMarkers(bucketClient)
 
 	// Create blocks.
@@ -83,6 +84,12 @@ func TestBlockCleaner_KeyPermissionDenied(t *testing.T) {
 	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, nil)
 	err := cleaner.cleanUser(ctx, userID, true)
 	require.NoError(t, err)
+	stat, err := os.Stat(path.Join(dir, userID, bucketindex.SyncStatusFile))
+	require.NoError(t, err)
+	require.True(t, stat.Size() > 0)
+	s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, userID, logger)
+	require.NoError(t, err)
+	require.Equal(t, bucketindex.CustomerManagedKeyError, s)
 }
 
 func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions) {
@@ -232,6 +239,9 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 		require.NoError(t, err)
 		assert.ElementsMatch(t, tc.expectedBlocks, idx.Blocks.GetULIDs())
 		assert.ElementsMatch(t, tc.expectedMarks, idx.BlockDeletionMarks.GetULIDs())
+		s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, tc.userID, logger)
+		require.NoError(t, err)
+		require.Equal(t, bucketindex.Ok, s)
 	}
 
 	assert.NoError(t, prom_testutil.GatherAndCompare(reg, strings.NewReader(`
@@ -385,6 +395,9 @@ func TestBlocksCleaner_ShouldRebuildBucketIndexOnCorruptedOne(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []ulid.ULID{block1, block3}, idx.Blocks.GetULIDs())
 	assert.ElementsMatch(t, []ulid.ULID{block3}, idx.BlockDeletionMarks.GetULIDs())
+	s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, userID, logger)
+	require.NoError(t, err)
+	require.Equal(t, bucketindex.Ok, s)
 }
 
 func TestBlocksCleaner_ShouldRemoveMetricsForTenantsNotBelongingAnymoreToTheShard(t *testing.T) {

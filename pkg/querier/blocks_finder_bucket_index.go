@@ -58,7 +58,7 @@ func (f *BucketIndexBlocksFinder) GetBlocks(ctx context.Context, userID string, 
 	}
 
 	// Get the bucket index for this user.
-	idx, err := f.loader.GetIndex(ctx, userID)
+	idx, ss, err := f.loader.GetIndex(ctx, userID)
 	if errors.Is(err, bucketindex.ErrIndexNotFound) {
 		// This is a legit edge case, happening when a new tenant has not shipped blocks to the storage yet
 		// so the bucket index hasn't been created yet.
@@ -67,6 +67,10 @@ func (f *BucketIndexBlocksFinder) GetBlocks(ctx context.Context, userID string, 
 
 	if errors.Is(err, bucket.ErrCustomerManagedKeyAccessDenied) {
 		return nil, nil, validation.AccessDeniedError(err.Error())
+	}
+
+	if ss == bucketindex.CustomerManagedKeyError {
+		return nil, nil, validation.AccessDeniedError(bucket.ErrCustomerManagedKeyAccessDenied.Error())
 	}
 
 	if err != nil {
