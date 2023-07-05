@@ -199,7 +199,7 @@ func TestBucketWithGlobalMarkers_ShouldRetryUpload(t *testing.T) {
 				originalPath := block1.String() + "/" + tc.mark
 				err := bkt.Upload(ctx, originalPath, strings.NewReader("{}"))
 				require.Equal(t, errors.New("test"), err)
-				require.Equal(t, mBucket.UploadCalls, 5)
+				require.Equal(t, mBucket.UploadCalls.Load(), int32(5))
 			})
 		}
 
