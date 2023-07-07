@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"os"
 	"path"
 	"strings"
 	"testing"
@@ -58,14 +57,14 @@ func TestBlocksCleaner(t *testing.T) {
 func TestBlockCleaner_KeyPermissionDenied(t *testing.T) {
 	const userID = "user-1"
 
-	bucketClient, dir := cortex_testutil.PrepareFilesystemBucket(t)
-	bucketClient = bucketindex.BucketWithGlobalMarkers(bucketClient)
+	bkt, _ := cortex_testutil.PrepareFilesystemBucket(t)
+	bkt = bucketindex.BucketWithGlobalMarkers(bkt)
 
 	// Create blocks.
 	ctx := context.Background()
 	deletionDelay := 12 * time.Hour
-	bucketClient = &cortex_testutil.MockBucketFailure{
-		Bucket: bucketClient,
+	mbucket := &cortex_testutil.MockBucketFailure{
+		Bucket: bkt,
 		GetFailures: map[string]error{
 			path.Join(userID, "bucket-index.json.gz"): cortex_testutil.ErrKeyAccessDeniedError,
 		},
@@ -78,18 +77,37 @@ func TestBlockCleaner_KeyPermissionDenied(t *testing.T) {
 	}
 
 	logger := log.NewNopLogger()
-	scanner := tsdb.NewUsersScanner(bucketClient, tsdb.AllUsers, logger)
+	scanner := tsdb.NewUsersScanner(mbucket, tsdb.AllUsers, logger)
 	cfgProvider := newMockConfigProvider()
 
-	cleaner := NewBlocksCleaner(cfg, bucketClient, scanner, cfgProvider, logger, nil)
-	err := cleaner.cleanUser(ctx, userID, true)
+	cleaner := NewBlocksCleaner(cfg, mbucket, scanner, cfgProvider, logger, nil)
+
+	// Clean User with no error
+	cleaner.bucketClient = bkt
+	err := cleaner.cleanUser(ctx, userID, false)
 	require.NoError(t, err)
-	stat, err := os.Stat(path.Join(dir, userID, bucketindex.SyncStatusFile))
+	s, err := bucketindex.ReadSyncStatus(ctx, bkt, userID, logger)
 	require.NoError(t, err)
-	require.True(t, stat.Size() > 0)
-	s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, userID, logger)
+	require.Equal(t, bucketindex.Ok, s.Status)
+	require.Equal(t, int64(0), s.NonQueryableUntil)
+
+	// Clean with cmk error
+	cleaner.bucketClient = mbucket
+	err = cleaner.cleanUser(ctx, userID, false)
 	require.NoError(t, err)
-	require.Equal(t, bucketindex.CustomerManagedKeyError, s)
+	s, err = bucketindex.ReadSyncStatus(ctx, bkt, userID, logger)
+	require.NoError(t, err)
+	require.Equal(t, bucketindex.CustomerManagedKeyError, s.Status)
+	require.Less(t, int64(0), s.NonQueryableUntil)
+
+	// Re grant access to the key
+	cleaner.bucketClient = bkt
+	err = cleaner.cleanUser(ctx, userID, false)
+	require.NoError(t, err)
+	s, err = bucketindex.ReadSyncStatus(ctx, bkt, userID, logger)
+	require.NoError(t, err)
+	require.Equal(t, bucketindex.Ok, s.Status)
+	require.Less(t, int64(0), s.NonQueryableUntil)
 }
 
 func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions) {
@@ -241,7 +259,7 @@ func testBlocksCleanerWithOptions(t *testing.T, options testBlocksCleanerOptions
 		assert.ElementsMatch(t, tc.expectedMarks, idx.BlockDeletionMarks.GetULIDs())
 		s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, tc.userID, logger)
 		require.NoError(t, err)
-		require.Equal(t, bucketindex.Ok, s)
+		require.Equal(t, bucketindex.Ok, s.Status)
 	}
 
 	assert.NoError(t, prom_testutil.GatherAndCompare(reg, strings.NewReader(`
@@ -397,7 +415,7 @@ func TestBlocksCleaner_ShouldRebuildBucketIndexOnCorruptedOne(t *testing.T) {
 	assert.ElementsMatch(t, []ulid.ULID{block3}, idx.BlockDeletionMarks.GetULIDs())
 	s, err := bucketindex.ReadSyncStatus(ctx, bucketClient, userID, logger)
 	require.NoError(t, err)
-	require.Equal(t, bucketindex.Ok, s)
+	require.Equal(t, bucketindex.Ok, s.Status)
 }
 
 func TestBlocksCleaner_ShouldRemoveMetricsForTenantsNotBelongingAnymoreToTheShard(t *testing.T) {

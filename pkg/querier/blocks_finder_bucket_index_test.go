@@ -230,19 +230,50 @@ func TestBucketIndexBlocksFinder_GetBlocks_BucketIndexIsTooOldWithCustomerKeyErr
 
 	ctx := context.Background()
 	bkt, _ := cortex_testutil.PrepareFilesystemBucket(t)
-	finder := prepareBucketIndexBlocksFinder(t, bkt)
 
 	require.NoError(t, bucketindex.WriteIndex(ctx, bkt, userID, nil, &bucketindex.Index{
 		Version:            bucketindex.IndexVersion1,
 		Blocks:             bucketindex.Blocks{},
 		BlockDeletionMarks: bucketindex.BlockDeletionMarks{},
-		UpdatedAt:          time.Now().Add(-2 * time.Hour).Unix(),
+		UpdatedAt:          time.Now().Unix(),
 	}))
 
-	bucketindex.WriteSyncStatus(ctx, bkt, userID, bucketindex.CustomerManagedKeyError, log.NewNopLogger())
+	testCases := map[string]struct {
+		err error
+		ss  bucketindex.Status
+	}{
+		"should return AccessDeniedError when CustomerManagedKeyError and still not queryable": {
+			err: validation.AccessDeniedError(bucket.ErrCustomerManagedKeyAccessDenied.Error()),
+			ss: bucketindex.Status{
+				Version:            bucketindex.SyncStatusFileVersion,
+				SyncTime:           time.Now().Unix(),
+				Status:             bucketindex.Ok,
+				NonQueryableReason: bucketindex.CustomerManagedKeyError,
+				NonQueryableUntil:  time.Now().Add(time.Minute * 10).Unix(),
+			},
+		},
+		"should not return error after NonQueryableUntil": {
+			ss: bucketindex.Status{
+				Version:            bucketindex.SyncStatusFileVersion,
+				SyncTime:           time.Now().Unix(),
+				Status:             bucketindex.Ok,
+				NonQueryableReason: bucketindex.CustomerManagedKeyError,
+				NonQueryableUntil:  time.Now().Add(-time.Minute * 10).Unix(),
+			},
+		},
+		"should not return error when UnknownStatus": {
+			ss: bucketindex.UnknownStatus,
+		},
+	}
 
-	_, _, err := finder.GetBlocks(ctx, userID, 10, 20)
-	require.Equal(t, validation.AccessDeniedError(bucket.ErrCustomerManagedKeyAccessDenied.Error()), err)
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			bucketindex.WriteSyncStatus(ctx, bkt, userID, tc.ss, log.NewNopLogger())
+			finder := prepareBucketIndexBlocksFinder(t, bkt)
+			_, _, err := finder.GetBlocks(ctx, userID, 10, 20)
+			require.Equal(t, tc.err, err)
+		})
+	}
 }
 
 func prepareBucketIndexBlocksFinder(t testing.TB, bkt objstore.Bucket) *BucketIndexBlocksFinder {

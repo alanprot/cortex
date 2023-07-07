@@ -91,7 +91,7 @@ func NewLoader(cfg LoaderConfig, bucketClient objstore.Bucket, cfgProvider bucke
 
 // GetIndex returns the bucket index for the given user. It returns the in-memory cached
 // index if available, or load it from the bucket otherwise.
-func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, SyncStatus, error) {
+func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, Status, error) {
 	l.indexesMx.RLock()
 	if entry := l.indexes[userID]; entry != nil {
 		idx := entry.index
@@ -101,7 +101,7 @@ func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, SyncStatu
 		// We don't check if the index is stale because it's the responsibility
 		// of the background job to keep it updated.
 		entry.requestedAt.Store(time.Now().Unix())
-		return idx, entry.syncStatus, err
+		return idx, UnknownStatus, err
 	}
 	l.indexesMx.RUnlock()
 
@@ -111,7 +111,7 @@ func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, SyncStatu
 	if err != nil {
 		// Cache the error, to avoid hammering the object store in case of persistent issues
 		// (eg. corrupted bucket index or not existing).
-		l.cacheIndex(userID, nil, Unknown, err)
+		l.cacheIndex(userID, nil, UnknownStatus, err)
 
 		if errors.Is(err, ErrIndexNotFound) {
 			level.Warn(l.logger).Log("msg", "bucket index not found", "user", userID)
@@ -124,7 +124,7 @@ func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, SyncStatu
 			level.Error(l.logger).Log("msg", "unable to load bucket index", "user", userID, "err", err)
 		}
 
-		return nil, Unknown, err
+		return nil, UnknownStatus, err
 	}
 
 	ss, err := ReadSyncStatus(ctx, l.bkt, userID, l.logger)
@@ -142,7 +142,7 @@ func (l *Loader) GetIndex(ctx context.Context, userID string) (*Index, SyncStatu
 	return idx, ss, nil
 }
 
-func (l *Loader) cacheIndex(userID string, idx *Index, ss SyncStatus, err error) {
+func (l *Loader) cacheIndex(userID string, idx *Index, ss Status, err error) {
 	l.indexesMx.Lock()
 	defer l.indexesMx.Unlock()
 
@@ -247,7 +247,7 @@ type cachedIndex struct {
 	// We cache either the index or the error occurred while fetching it. They're
 	// mutually exclusive.
 	index      *Index
-	syncStatus SyncStatus
+	syncStatus Status
 	err        error
 
 	// Unix timestamp (seconds) of when the index has been updated from the storage the last time.
@@ -257,7 +257,7 @@ type cachedIndex struct {
 	requestedAt atomic.Int64
 }
 
-func newCachedIndex(idx *Index, ss SyncStatus, err error) *cachedIndex {
+func newCachedIndex(idx *Index, ss Status, err error) *cachedIndex {
 	entry := &cachedIndex{
 		index:      idx,
 		err:        err,

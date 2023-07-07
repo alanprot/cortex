@@ -23,7 +23,7 @@ import (
 // SyncStatus is an enum for the possibles sync status.
 type SyncStatus string
 
-// Possible MatchTypes.
+// Possible SyncStatus.
 const (
 	Ok                      SyncStatus = "Ok"
 	GenericError            SyncStatus = "GenericError"
@@ -41,15 +41,29 @@ const (
 var (
 	ErrIndexNotFound  = errors.New("bucket index not found")
 	ErrIndexCorrupted = errors.New("bucket index corrupted")
+
+	UnknownStatus = Status{
+		Version:            SyncStatusFileVersion,
+		Status:             Unknown,
+		NonQueryableReason: Unknown,
+	}
 )
 
-type status struct {
+type Status struct {
 	// SyncTime is a unix timestamp of when the bucket index was synced
-	SyncTime int64 `json:"syncTime"`
+	SyncTime int64 `json:"sync_ime"`
 	// Version of the file.
 	Version int `json:"version"`
 	// Last Sync status
 	Status SyncStatus `json:"status"`
+	// Should not allow query until this time
+	NonQueryableUntil int64 `json:"non_queryable_until"`
+	// Should not allow query until this time
+	NonQueryableReason SyncStatus `json:"non_queryable_reason"`
+}
+
+func (s *Status) GetNonQueryableUntil() time.Time {
+	return time.Unix(s.NonQueryableUntil, 0)
 }
 
 // ReadIndex reads, parses and returns a bucket index from the bucket.
@@ -145,18 +159,12 @@ func DeleteIndexSyncStatus(ctx context.Context, bkt objstore.Bucket, userID stri
 
 // WriteSyncStatus upload the sync status file with the corresponding SyncStatus
 // This file is not encrypted using the CMK configuration
-func WriteSyncStatus(ctx context.Context, bkt objstore.Bucket, userID string, ss SyncStatus, logger log.Logger) {
+func WriteSyncStatus(ctx context.Context, bkt objstore.Bucket, userID string, ss Status, logger log.Logger) {
 	// Inject the user/tenant prefix.
 	bkt = bucket.NewPrefixedBucketClient(bkt, userID)
 
-	s := status{
-		SyncTime: time.Now().Unix(),
-		Status:   ss,
-		Version:  SyncStatusFileVersion,
-	}
-
 	// Marshal the index.
-	content, err := json.Marshal(s)
+	content, err := json.Marshal(ss)
 	if err != nil {
 		level.Warn(logger).Log("msg", "failed to write bucket index status", "err", err)
 		return
@@ -170,7 +178,7 @@ func WriteSyncStatus(ctx context.Context, bkt objstore.Bucket, userID string, ss
 
 // ReadSyncStatus retrieves the SyncStatus from the sync status file
 // If the file is not found, it returns `Unknown`
-func ReadSyncStatus(ctx context.Context, b objstore.Bucket, userID string, logger log.Logger) (SyncStatus, error) {
+func ReadSyncStatus(ctx context.Context, b objstore.Bucket, userID string, logger log.Logger) (Status, error) {
 	// Inject the user/tenant prefix.
 	bkt := bucket.NewPrefixedBucketClient(b, userID)
 
@@ -178,9 +186,9 @@ func ReadSyncStatus(ctx context.Context, b objstore.Bucket, userID string, logge
 
 	if err != nil {
 		if bkt.IsObjNotFoundErr(err) {
-			return Unknown, nil
+			return UnknownStatus, nil
 		}
-		return Unknown, err
+		return UnknownStatus, err
 	}
 
 	defer runutil.CloseWithLogOnErr(logger, reader, "close sync status reader")
@@ -188,16 +196,16 @@ func ReadSyncStatus(ctx context.Context, b objstore.Bucket, userID string, logge
 	content, err := io.ReadAll(reader)
 
 	if err != nil {
-		return Unknown, err
+		return UnknownStatus, err
 	}
 
-	s := status{}
+	s := Status{}
 	if err = json.Unmarshal(content, &s); err != nil {
-		return Unknown, errors.Wrap(err, "error unmarshalling sync status")
+		return UnknownStatus, errors.Wrap(err, "error unmarshalling sync status")
 	}
 	if s.Version != SyncStatusFileVersion {
-		return Unknown, errors.New("bucket index sync version mismatch")
+		return UnknownStatus, errors.New("bucket index sync version mismatch")
 	}
 
-	return s.Status, nil
+	return s, nil
 }
