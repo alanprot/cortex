@@ -29,13 +29,11 @@ import (
 	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/logging"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/cortexproject/cortex/pkg/storage/bucket"
 	"github.com/cortexproject/cortex/pkg/storage/tsdb"
 	"github.com/cortexproject/cortex/pkg/util/backoff"
-	cortex_errors "github.com/cortexproject/cortex/pkg/util/errors"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/cortexproject/cortex/pkg/util/spanlogger"
 	"github.com/cortexproject/cortex/pkg/util/validation"
@@ -68,10 +66,6 @@ type BucketStores struct {
 	storesMu sync.RWMutex
 	stores   map[string]*store.BucketStore
 
-	// Keeps the last sync error for the  bucket store for each tenant.
-	storesErrorsMu sync.RWMutex
-	storesErrors   map[string]error
-
 	// Metrics.
 	syncTimes         prometheus.Histogram
 	syncLastSuccess   prometheus.Gauge
@@ -101,7 +95,6 @@ func NewBucketStores(cfg tsdb.BlocksStorageConfig, shardingStrategy ShardingStra
 		bucket:             cachingBucket,
 		shardingStrategy:   shardingStrategy,
 		stores:             map[string]*store.BucketStore{},
-		storesErrors:       map[string]error{},
 		logLevel:           logLevel,
 		bucketStoreMetrics: NewBucketStoreMetrics(),
 		metaFetcherMetrics: NewMetadataFetcherMetrics(),
@@ -233,19 +226,9 @@ func (u *BucketStores) syncUsersBlocks(ctx context.Context, f func(context.Conte
 
 			for job := range jobs {
 				if err := f(ctx, job.store); err != nil {
-					if errors.Is(err, bucket.ErrCustomerManagedKeyAccessDenied) {
-						u.storesErrorsMu.Lock()
-						u.storesErrors[job.userID] = err
-						u.storesErrorsMu.Unlock()
-					} else {
-						errsMx.Lock()
-						errs.Add(errors.Wrapf(err, "failed to synchronize TSDB blocks for user %s", job.userID))
-						errsMx.Unlock()
-					}
-				} else {
-					u.storesErrorsMu.Lock()
-					delete(u.storesErrors, job.userID)
-					u.storesErrorsMu.Unlock()
+					errsMx.Lock()
+					errs.Add(errors.Wrapf(err, "failed to synchronize TSDB blocks for user %s", job.userID))
+					errsMx.Unlock()
 				}
 			}
 		}()
@@ -299,23 +282,14 @@ func (u *BucketStores) Series(req *storepb.SeriesRequest, srv storepb.Store_Seri
 	}
 
 	store := u.getStore(userID)
-	userBkt := bucket.NewUserBucketClient(userID, u.bucket, u.limits)
 	if store == nil {
 		return nil
 	}
 
-	err := u.getStoreError(userID)
-
-	if err != nil && cortex_errors.ErrorIs(err, userBkt.IsCustomerManagedKeyError) {
-		return httpgrpc.Errorf(int(codes.PermissionDenied), "store error: %s", err)
-	}
-
-	err = store.Series(req, spanSeriesServer{
+	return store.Series(req, spanSeriesServer{
 		Store_SeriesServer: srv,
 		ctx:                spanCtx,
 	})
-
-	return err
 }
 
 // LabelNames implements the Storegateway proto service.
@@ -329,15 +303,8 @@ func (u *BucketStores) LabelNames(ctx context.Context, req *storepb.LabelNamesRe
 	}
 
 	store := u.getStore(userID)
-	userBkt := bucket.NewUserBucketClient(userID, u.bucket, u.limits)
 	if store == nil {
 		return &storepb.LabelNamesResponse{}, nil
-	}
-
-	err := u.getStoreError(userID)
-
-	if err != nil && cortex_errors.ErrorIs(err, userBkt.IsCustomerManagedKeyError) {
-		return nil, httpgrpc.Errorf(int(codes.PermissionDenied), "store error: %s", err)
 	}
 
 	resp, err := store.LabelNames(ctx, req)
@@ -356,15 +323,8 @@ func (u *BucketStores) LabelValues(ctx context.Context, req *storepb.LabelValues
 	}
 
 	store := u.getStore(userID)
-	userBkt := bucket.NewUserBucketClient(userID, u.bucket, u.limits)
 	if store == nil {
 		return &storepb.LabelValuesResponse{}, nil
-	}
-
-	err := u.getStoreError(userID)
-
-	if err != nil && cortex_errors.ErrorIs(err, userBkt.IsCustomerManagedKeyError) {
-		return nil, httpgrpc.Errorf(int(codes.PermissionDenied), "store error: %s", err)
 	}
 
 	resp, err := store.LabelValues(ctx, req)
@@ -392,12 +352,6 @@ func (u *BucketStores) getStore(userID string) *store.BucketStore {
 	u.storesMu.RLock()
 	defer u.storesMu.RUnlock()
 	return u.stores[userID]
-}
-
-func (u *BucketStores) getStoreError(userID string) error {
-	u.storesErrorsMu.RLock()
-	defer u.storesErrorsMu.RUnlock()
-	return u.storesErrors[userID]
 }
 
 var (
