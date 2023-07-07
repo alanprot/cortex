@@ -113,8 +113,7 @@ func (w *Updater) updateBlocks(ctx context.Context, old []*Block) (blocks []*Blo
 			continue
 		}
 		if errors.Is(err, errBlockMetaKeyAccessDeniedErr) {
-			partials[id] = err
-			level.Warn(w.logger).Log("msg", "skipped partial block when updating bucket index due key permission", "block", id.String())
+			level.Warn(w.logger).Log("msg", "skipped block when updating bucket index due key permission", "block", id.String())
 			continue
 		}
 		if errors.Is(err, ErrBlockMetaCorrupted) {

@@ -19,7 +19,6 @@ import (
 
 const (
 	corruptedBucketIndex = "corrupted-bucket-index"
-	keyAccessDenied      = "key-access-denied"
 	noBucketIndex        = "no-bucket-index"
 )
 
@@ -68,7 +67,7 @@ func (f *BucketIndexMetadataFetcher) Fetch(ctx context.Context) (metas map[ulid.
 	start := time.Now()
 	defer func() {
 		f.metrics.SyncDuration.Observe(time.Since(start).Seconds())
-		if err != nil && !errors.Is(err, bucket.ErrCustomerManagedKeyAccessDenied) {
+		if err != nil {
 			f.metrics.SyncFailures.Inc()
 		}
 	}()
@@ -93,16 +92,6 @@ func (f *BucketIndexMetadataFetcher) Fetch(ctx context.Context) (metas map[ulid.
 		f.metrics.Submit()
 
 		return nil, nil, nil
-	}
-
-	if errors.Is(err, bucket.ErrCustomerManagedKeyAccessDenied) {
-		// stop the job and return the error
-		// this error should be used to return Access Denied to the caller
-		level.Error(f.logger).Log("msg", "bucket index key permission revoked", "user", f.userID, "err", err)
-		f.metrics.Synced.WithLabelValues(keyAccessDenied).Set(1)
-		f.metrics.Submit()
-
-		return nil, nil, err
 	}
 
 	if err != nil {

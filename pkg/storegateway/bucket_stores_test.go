@@ -100,13 +100,7 @@ func TestBucketStores_CustomerKeyError(t *testing.T) {
 		mockInitialSync bool
 		GetFailures     map[string]error
 	}{
-		"should return ResourceExhausted when fail to get bucket index": {
-			mockInitialSync: true,
-			GetFailures: map[string]error{
-				"user-1/bucket-index.json.gz": cortex_testutil.ErrKeyAccessDeniedError,
-			},
-		},
-		"should return ResourceExhausted when fail to block index": {
+		"should return PermissionDenied when fail to block index": {
 			mockInitialSync: false,
 			GetFailures: map[string]error{
 				"user-1/" + bucketIndexes["user-1"].Blocks[0].ID.String() + "/index": cortex_testutil.ErrKeyAccessDeniedError,
@@ -131,15 +125,7 @@ func TestBucketStores_CustomerKeyError(t *testing.T) {
 
 			// Should set the error on user-1
 			require.NoError(t, stores.InitialSync(ctx))
-			if tc.mockInitialSync {
-				require.ErrorIs(t, stores.storesErrors["user-1"], bucket.ErrCustomerManagedKeyAccessDenied)
-				require.ErrorIs(t, stores.storesErrors["user-2"], nil)
-			}
 			require.NoError(t, stores.SyncBlocks(context.Background()))
-			if tc.mockInitialSync {
-				require.ErrorIs(t, stores.storesErrors["user-1"], bucket.ErrCustomerManagedKeyAccessDenied)
-				require.ErrorIs(t, stores.storesErrors["user-2"], nil)
-			}
 
 			mBucket.GetFailures = tc.GetFailures
 
@@ -164,8 +150,6 @@ func TestBucketStores_CustomerKeyError(t *testing.T) {
 			// Cleaning the error
 			mBucket.GetFailures = map[string]error{}
 			require.NoError(t, stores.SyncBlocks(context.Background()))
-			require.ErrorIs(t, stores.storesErrors["user-1"], nil)
-			require.ErrorIs(t, stores.storesErrors["user-2"], nil)
 			_, _, err = querySeries(stores, "user-1", "series", 0, 100)
 			require.NoError(t, err)
 			_, _, err = querySeries(stores, "user-2", "series", 0, 100)
