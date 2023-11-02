@@ -638,6 +638,7 @@ func (t *Cortex) initConfig() (serv services.Service, err error) {
 
 func (t *Cortex) initAlertManager() (serv services.Service, err error) {
 	t.Cfg.Alertmanager.ShardingRing.ListenPort = t.Cfg.Server.GRPCListenPort
+	t.Cfg.Alertmanager.TargetHeaders = t.Cfg.API.HTTPRequestHeadersToLog
 
 	// Initialise the store.
 	store, err := alertstore.NewAlertStore(context.Background(), t.Cfg.AlertmanagerStorage, t.Overrides, util_log.Logger, prometheus.DefaultRegisterer)

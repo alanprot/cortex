@@ -90,6 +90,8 @@ type MultitenantAlertmanagerConfig struct {
 
 	EnabledTenants  flagext.StringSliceCSV `yaml:"enabled_tenants"`
 	DisabledTenants flagext.StringSliceCSV `yaml:"disabled_tenants"`
+
+	TargetHeaders []string `yaml:"-"` // Propagated by config.
 }
 
 type ClusterConfig struct {
@@ -424,7 +426,7 @@ func createMultitenantAlertmanager(cfg *MultitenantAlertmanagerConfig, fallbackC
 		am.grpcServer = server.NewServer(&handlerForGRPCServer{am: am})
 
 		am.alertmanagerClientsPool = newAlertmanagerClientsPool(client.NewRingServiceDiscovery(am.ring), cfg.AlertmanagerClient, logger, am.registry)
-		am.distributor, err = NewDistributor(cfg.AlertmanagerClient, cfg.MaxRecvMsgSize, am.ring, am.alertmanagerClientsPool, log.With(logger, "component", "AlertmanagerDistributor"), am.registry)
+		am.distributor, err = NewDistributor(cfg.AlertmanagerClient, cfg.MaxRecvMsgSize, am.ring, am.alertmanagerClientsPool, cfg.TargetHeaders, log.With(logger, "component", "AlertmanagerDistributor"), am.registry)
 		if err != nil {
 			return nil, errors.Wrap(err, "create distributor")
 		}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/textproto"
 	"path"
 	"strings"
 	"sync"
@@ -39,10 +40,12 @@ type Distributor struct {
 	alertmanagerClientsPool ClientsPool
 
 	logger log.Logger
+
+	targetHeaders []string
 }
 
 // NewDistributor constructs a new Distributor
-func NewDistributor(cfg ClientConfig, maxRecvMsgSize int64, alertmanagersRing *ring.Ring, alertmanagerClientsPool ClientsPool, logger log.Logger, reg prometheus.Registerer) (d *Distributor, err error) {
+func NewDistributor(cfg ClientConfig, maxRecvMsgSize int64, alertmanagersRing *ring.Ring, alertmanagerClientsPool ClientsPool, targetHeaders []string, logger log.Logger, reg prometheus.Registerer) (d *Distributor, err error) {
 	if alertmanagerClientsPool == nil {
 		alertmanagerClientsPool = newAlertmanagerClientsPool(client.NewRingServiceDiscovery(alertmanagersRing), cfg, logger, reg)
 	}
@@ -53,6 +56,7 @@ func NewDistributor(cfg ClientConfig, maxRecvMsgSize int64, alertmanagersRing *r
 		maxRecvMsgSize:          maxRecvMsgSize,
 		alertmanagerRing:        alertmanagersRing,
 		alertmanagerClientsPool: alertmanagerClientsPool,
+		targetHeaders:           targetHeaders,
 	}
 
 	d.Service = services.NewBasicService(nil, d.running, nil)
@@ -170,6 +174,7 @@ func (d *Distributor) doQuorum(userID string, w http.ResponseWriter, r *http.Req
 	var responses []*httpgrpc.HTTPResponse
 	var responsesMtx sync.Mutex
 	grpcHeaders := httpToHttpgrpcHeaders(r.Header)
+
 	err = ring.DoBatch(r.Context(), RingOp, d.alertmanagerRing, []uint32{shardByUser(userID)}, func(am ring.InstanceDesc, _ []int) error {
 		// Use a background context to make sure all alertmanagers get the request even if we return early.
 		localCtx := opentracing.ContextWithSpan(user.InjectOrgID(context.Background(), userID), opentracing.SpanFromContext(r.Context()))
@@ -303,6 +308,23 @@ func (d *Distributor) doRequest(ctx context.Context, am ring.InstanceDesc, req *
 	amClient, err := d.alertmanagerClientsPool.GetClientFor(am.Addr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to get alertmanager client from pool (alertmanager address: %s)", am.Addr)
+	}
+
+	headers := make(map[string]string, 0)
+	for _, h := range req.Headers {
+		headers[h.Key] = h.Values[0]
+	}
+
+	headerMap := make(map[string]string, 0)
+	// Remove non-existent header.
+	for _, header := range d.targetHeaders {
+		if v, ok := headers[textproto.CanonicalMIMEHeaderKey(header)]; ok {
+			headerMap[header] = v
+		}
+	}
+
+	if len(headerMap) > 0 {
+		ctx = util_log.ContextWithHeaderMap(ctx, headerMap)
 	}
 
 	return amClient.HandleRequest(ctx, req)
