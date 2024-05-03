@@ -2,6 +2,8 @@ package util
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
 	"sync"
 	"unsafe"
 
@@ -138,4 +140,17 @@ func MergeSortedSlices(ctx context.Context, a ...[]string) ([]string, error) {
 		}
 	}
 	return r, nil
+}
+
+// StringSliceSeed returns seed for random number generator, computed from provided strings.
+func StringSliceSeed(s ...string) int64 {
+	hasher := md5.New()
+
+	for _, str := range s {
+		hasher.Write(YoloBuf(str)) // nolint:errcheck
+	}
+	checksum := hasher.Sum(nil)
+
+	// Generate the seed based on the first 64 bits of the checksum.
+	return int64(binary.BigEndian.Uint64(checksum))
 }

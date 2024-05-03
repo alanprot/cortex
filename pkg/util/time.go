@@ -83,16 +83,26 @@ func DurationWithJitter(input time.Duration, variancePerc float64) time.Duration
 }
 
 // DurationWithPositiveJitter returns random duration from "input" to "input + input*variance" interval.
-func DurationWithPositiveJitter(input time.Duration, variancePerc float64) time.Duration {
+func DurationWithPositiveJitter(input time.Duration, variancePerc float64, seed int64) time.Duration {
+	// No duration? No jitter.
+	if input == 0 {
+		return 0
+	}
+	return input + PositiveJitter(input, variancePerc, seed)
+}
+
+// PositiveJitter returns random duration from "input" to input*variance" interval.
+func PositiveJitter(input time.Duration, variancePerc float64, seed int64) time.Duration {
 	// No duration? No jitter.
 	if input == 0 {
 		return 0
 	}
 
 	variance := int64(float64(input) * variancePerc)
-	jitter := rand.Int63n(variance)
+	rnd := rand.New(rand.NewSource(seed))
+	jitter := rnd.Int63n(variance)
 
-	return input + time.Duration(jitter)
+	return time.Duration(jitter)
 }
 
 // NewDisableableTicker essentially wraps NewTicker but allows the ticker to be disabled by passing

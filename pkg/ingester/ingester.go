@@ -70,7 +70,7 @@ const (
 
 	// Jitter applied to the idle timeout to prevent compaction in all ingesters concurrently.
 	compactionIdleTimeoutJitter = 0.25
-	initialHeadCompactionJitter = 0.5
+	initialHeadCompactionJitter = 1
 
 	instanceIngestionRateTickInterval = time.Second
 
@@ -687,7 +687,7 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 	i.TSDBState.shipperIngesterID = i.lifecycler.ID
 
 	// Apply positive jitter only to ensure that the minimum timeout is adhered to.
-	i.TSDBState.compactionIdleTimeout = util.DurationWithPositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionIdleTimeout, compactionIdleTimeoutJitter)
+	i.TSDBState.compactionIdleTimeout = util.DurationWithPositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionIdleTimeout, compactionIdleTimeoutJitter, i.zonalRandomSeed())
 	level.Info(i.logger).Log("msg", "TSDB idle compaction timeout set", "timeout", i.TSDBState.compactionIdleTimeout)
 
 	i.BasicService = services.NewBasicService(i.starting, i.updateLoop, i.stopping)
@@ -2407,7 +2407,7 @@ func (i *Ingester) shipBlocks(ctx context.Context, allowed *util.AllowedTenants)
 func (i *Ingester) compactionLoop(ctx context.Context) error {
 	// Apply a jitter on the first head compaction
 	firstHeadCompaction := true
-	ticker := time.NewTicker(util.DurationWithPositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionInterval, initialHeadCompactionJitter))
+	ticker := time.NewTicker(util.PositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionInterval, initialHeadCompactionJitter, i.zonalRandomSeed()))
 	defer ticker.Stop()
 
 	for ctx.Err() == nil {
@@ -2583,6 +2583,13 @@ func (i *Ingester) closeAndDeleteUserTSDBIfIdle(userID string) tsdbCloseCheckRes
 
 	level.Info(i.logger).Log("msg", "deleted local TSDB, due to being idle", "user", userID, "dir", dir)
 	return tsdbIdleClosed
+}
+
+func (i *Ingester) zonalRandomSeed() int64 {
+	if i.cfg.LifecyclerConfig.RingConfig.ZoneAwarenessEnabled {
+		return util.StringSliceSeed("ingester", i.lifecycler.Zone)
+	}
+	return util.StringSliceSeed("ingester", i.lifecycler.ID)
 }
 
 // pushMetadata returns number of ingested metadata.
