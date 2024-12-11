@@ -1204,6 +1204,8 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 
 	// Walk the samples, appending them to the users database
 	app := db.Appender(ctx).(extendedAppender)
+	newSeries := []labels.Labels{}
+
 	for _, ts := range req.Timeseries {
 		// The labels must be sorted (in our case, it's guaranteed a write request
 		// has sorted labels once hit the ingester).
@@ -1233,6 +1235,7 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 				copiedLabels = cortexpb.FromLabelAdaptersToLabelsWithCopy(ts.Labels)
 				// Retain the reference in case there are multiple samples for the series.
 				if ref, err = app.Append(0, copiedLabels, s.TimestampMs, s.Value); err == nil {
+					newSeries = append(newSeries, copiedLabels)
 					succeededSamplesCount++
 					continue
 				}
@@ -1274,6 +1277,7 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 					// Copy the label set because both TSDB and the active series tracker may retain it.
 					copiedLabels = cortexpb.FromLabelAdaptersToLabelsWithCopy(ts.Labels)
 					if ref, err = app.AppendHistogram(0, copiedLabels, hp.TimestampMs, h, fh); err == nil {
+						newSeries = append(newSeries, copiedLabels)
 						succeededHistogramsCount++
 						continue
 					}
@@ -1342,6 +1346,13 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 	if err := app.Commit(); err != nil {
 		return nil, wrapWithUser(err, userID)
 	}
+
+	if db.postingCache != nil {
+		for _, s := range newSeries {
+			db.postingCache.ExpireSeries(s)
+		}
+	}
+
 	i.TSDBState.appenderCommitDuration.Observe(time.Since(startCommit).Seconds())
 
 	// If only invalid samples or histograms are pushed, don't change "last update", as TSDB was not modified.
