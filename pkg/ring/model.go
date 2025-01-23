@@ -493,6 +493,14 @@ func (d *Desc) getTokensInfo() map[uint32]instanceInfo {
 	return out
 }
 
+func (d *Desc) GetInstances() map[string]genericRingInstance {
+	r := make(map[string]genericRingInstance, len(d.Ingesters))
+	for ingKey, ing := range d.Ingesters {
+		r[ingKey] = &ing
+	}
+	return r
+}
+
 // GetTokens returns sorted list of tokens owned by all instances within the ring.
 func (d *Desc) GetTokens() []uint32 {
 	instances := make([][]uint32, 0, len(d.Ingesters))

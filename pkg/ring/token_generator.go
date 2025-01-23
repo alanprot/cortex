@@ -20,12 +20,23 @@ var (
 	supportedTokenStrategy = []string{strings.ToLower(randomTokenStrategy), strings.ToLower(minimizeSpreadTokenStrategy)}
 )
 
+type genericRingInstance interface {
+	GetTokens() []uint32
+	GetZone() string
+	GetRegisteredTimestamp() int64
+}
+
+type genericRing interface {
+	GetTokens() []uint32
+	GetInstances() map[string]genericRingInstance
+}
+
 type TokenGenerator interface {
 	// GenerateTokens make numTokens unique random tokens, none of which clash
 	// with takenTokens. Generated tokens are sorted.
 	// GenerateTokens can return any number of token between 0 and numTokens if force is set to false.
 	// If force is set to true, all tokens needs to be generated
-	GenerateTokens(ring *Desc, id, zone string, numTokens int, force bool) []uint32
+	GenerateTokens(ring genericRing, id, zone string, numTokens int, force bool) []uint32
 }
 
 type RandomTokenGenerator struct{}
@@ -34,7 +45,7 @@ func NewRandomTokenGenerator() TokenGenerator {
 	return &RandomTokenGenerator{}
 }
 
-func (g *RandomTokenGenerator) GenerateTokens(ring *Desc, _, _ string, numTokens int, _ bool) []uint32 {
+func (g *RandomTokenGenerator) GenerateTokens(ring genericRing, _, _ string, numTokens int, _ bool) []uint32 {
 	if numTokens <= 0 {
 		return []uint32{}
 	}
@@ -79,38 +90,38 @@ func NewMinimizeSpreadTokenGenerator() TokenGenerator {
 // GenerateTokens try to place nearly generated tokens on the optimal position given the existing ingesters in the ring.
 // In order to do so, order all the existing ingester on the ring based on its ownership (by az), and start to create
 // new tokens in order to balance out the ownership amongst all ingesters.
-func (g *MinimizeSpreadTokenGenerator) GenerateTokens(ring *Desc, id, zone string, numTokens int, force bool) []uint32 {
+func (g *MinimizeSpreadTokenGenerator) GenerateTokens(ring genericRing, id, zone string, numTokens int, force bool) []uint32 {
 	if numTokens <= 0 {
 		return []uint32{}
 	}
 
 	r := make([]uint32, 0, numTokens)
 	usedTokens := map[uint32]string{}
-	instanceTokens := make([][]uint32, 0, len(ring.Ingesters))
+	instanceTokens := make([][]uint32, 0, len(ring.GetInstances()))
 	tokensPerInstanceWithDistance := map[string]*totalTokenPerInstance{}
 
-	for i, instance := range ring.GetIngesters() {
-		for _, token := range instance.Tokens {
+	for i, instance := range ring.GetInstances() {
+		for _, token := range instance.GetTokens() {
 			usedTokens[token] = i
 		}
 
 		// Only take in consideration tokens from instances in the same AZ
-		if instance.Zone != zone {
+		if instance.GetZone() != zone {
 			continue
 		}
 
-		instanceTokens = append(instanceTokens, instance.Tokens)
+		instanceTokens = append(instanceTokens, instance.GetTokens())
 
 		// Do not add the current instance on the tokensPerInstanceWithDistance map as it will be used to create the heap
 		// to calculate from what instance we should take ownership
 		if i != id {
-			tokensPerInstanceWithDistance[i] = &totalTokenPerInstance{id: i, zone: instance.Zone}
+			tokensPerInstanceWithDistance[i] = &totalTokenPerInstance{id: i, zone: instance.GetZone()}
 
-			if len(instance.Tokens) == 0 {
+			if len(instance.GetTokens()) == 0 {
 				// If there is more than one ingester with no tokens, use MinimizeSpread only for the first registered ingester.
 				// In case of a tie, use the ingester ID as a tiebreaker.
-				if instance.RegisteredTimestamp < ring.Ingesters[id].RegisteredTimestamp ||
-					(instance.RegisteredTimestamp == ring.Ingesters[id].RegisteredTimestamp && i < id) {
+				if instance.GetRegisteredTimestamp() < ring.GetInstances()[id].GetRegisteredTimestamp() ||
+					(instance.GetRegisteredTimestamp() == ring.GetInstances()[id].GetRegisteredTimestamp() && i < id) {
 					if force {
 						return g.innerGenerator.GenerateTokens(ring, id, zone, numTokens, true)
 					} else {

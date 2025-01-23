@@ -227,10 +227,11 @@ type Ingester struct {
 
 	logger log.Logger
 
-	lifecycler         *ring.Lifecycler
-	limits             *validation.Overrides
-	limiter            *Limiter
-	subservicesWatcher *services.FailureWatcher
+	lifecycler          *ring.Lifecycler
+	partitionLifecycler *ring.PartitionLifecycler
+	limits              *validation.Overrides
+	limiter             *Limiter
+	subservicesWatcher  *services.FailureWatcher
 
 	stoppedMtx sync.RWMutex // protects stopped
 	stopped    bool         // protected by stoppedMtx
@@ -761,6 +762,14 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 	i.subservicesWatcher = services.NewFailureWatcher()
 	i.subservicesWatcher.WatchService(i.lifecycler)
 
+	i.partitionLifecycler, err = ring.NewPartitionLifecycler(cfg.LifecyclerConfig, logger, "ingester-partition", "ingester-partition", registerer)
+	if err != nil {
+		return nil, err
+	}
+
+	i.subservicesWatcher = services.NewFailureWatcher()
+	i.subservicesWatcher.WatchService(i.partitionLifecycler)
+
 	// Init the limter and instantiate the user states which depend on it
 	i.limiter = NewLimiter(
 		limits,
@@ -849,6 +858,14 @@ func (i *Ingester) starting(ctx context.Context) error {
 		return errors.Wrap(err, "failed to start lifecycler")
 	}
 
+	if err := i.partitionLifecycler.StartAsync(context.Background()); err != nil {
+		return errors.Wrap(err, "failed to start lifecycler")
+	}
+
+	if err := i.partitionLifecycler.AwaitRunning(ctx); err != nil {
+		return errors.Wrap(err, "failed to start lifecycler")
+	}
+
 	if err := i.openExistingTSDB(ctx); err != nil {
 		// Try to rollback and close opened TSDBs before halting the ingester.
 		i.closeAllTSDB()
@@ -857,6 +874,7 @@ func (i *Ingester) starting(ctx context.Context) error {
 	}
 
 	i.lifecycler.Join()
+	i.partitionLifecycler.Join(ctx)
 
 	// let's start the rest of subservices via manager
 	servs := []services.Service(nil)
@@ -914,6 +932,10 @@ func (i *Ingester) stopping(_ error) error {
 
 	// Next initiate our graceful exit from the ring.
 	if err := services.StopAndAwaitTerminated(context.Background(), i.lifecycler); err != nil {
+		level.Warn(i.logger).Log("msg", "failed to stop ingester lifecycler", "err", err)
+	}
+
+	if err := services.StopAndAwaitTerminated(context.Background(), i.partitionLifecycler); err != nil {
 		level.Warn(i.logger).Log("msg", "failed to stop ingester lifecycler", "err", err)
 	}
 

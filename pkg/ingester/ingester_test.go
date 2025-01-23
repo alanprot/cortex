@@ -177,6 +177,31 @@ func TestMatcherCache(t *testing.T) {
 	`, callPerMatcher*numberOfDifferentMatchers-numberOfDifferentMatchers, cfg.MatchersCacheMaxItems, callPerMatcher*numberOfDifferentMatchers)), "ingester_matchers_cache_requests_total", "ingester_matchers_cache_hits_total", "ingester_matchers_cache_items", "ingester_matchers_cache_max_items", "ingester_matchers_cache_evicted_total"))
 }
 
+func TestPartition(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	tenantLimits := newMockTenantLimits(map[string]*validation.Limits{})
+	limits := defaultLimitsTestConfig()
+	cfg := defaultIngesterTestConfig(t)
+
+	dir := t.TempDir()
+	chunksDir := filepath.Join(dir, "chunks")
+	blocksDir := filepath.Join(dir, "blocks")
+	require.NoError(t, os.Mkdir(chunksDir, os.ModePerm))
+	require.NoError(t, os.Mkdir(blocksDir, os.ModePerm))
+
+	ing, err := prepareIngesterWithBlocksStorageAndLimits(t, cfg, limits, tenantLimits, blocksDir, registry, true)
+	require.NoError(t, err)
+	require.NoError(t, services.StartAndAwaitRunning(context.Background(), ing))
+	defer services.StopAndAwaitTerminated(context.Background(), ing) //nolint:errcheck
+	
+	// Wait until it's ACTIVE
+	test.Poll(t, time.Second, ring.ACTIVE, func() interface{} {
+		return ing.lifecycler.GetState()
+	})
+
+	time.Sleep(10 * time.Second)
+}
+
 func TestIngesterDeletionRace(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	limits := defaultLimitsTestConfig()

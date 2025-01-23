@@ -60,6 +60,7 @@ import (
 const (
 	API                      string = "api"
 	Ring                     string = "ring"
+	PartitioningRing         string = "partitioning-ring"
 	RuntimeConfig            string = "runtime-config"
 	Overrides                string = "overrides"
 	OverridesExporter        string = "overrides-exporter"
@@ -139,7 +140,8 @@ func (t *Cortex) initServer() (services.Service, error) {
 
 func (t *Cortex) initRing() (serv services.Service, err error) {
 	t.Cfg.Ingester.LifecyclerConfig.RingConfig.KVStore.Multi.ConfigProvider = multiClientRuntimeConfigChannel(t.RuntimeConfig)
-	t.Ring, err = ring.New(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+	reg := prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer)
+	t.Ring, err = ring.New(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "ingester", ingester.RingKey, util_log.Logger, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +149,19 @@ func (t *Cortex) initRing() (serv services.Service, err error) {
 	t.API.RegisterRing(t.Ring)
 
 	return t.Ring, nil
+}
+
+func (t *Cortex) initPartitioningRing() (serv services.Service, err error) {
+	t.Cfg.Ingester.LifecyclerConfig.RingConfig.KVStore.Multi.ConfigProvider = multiClientRuntimeConfigChannel(t.RuntimeConfig)
+	reg := prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer)
+	t.PartitionRing, err = ring.NewPartitionRing(t.Cfg.Ingester.LifecyclerConfig.RingConfig, t.Ring, "ingester-partition", "ingester-partition", util_log.Logger, reg)
+	if err != nil {
+		return nil, err
+	}
+
+	t.API.RegisterPartitioningRing(t.PartitionRing)
+
+	return t.PartitionRing, nil
 }
 
 func (t *Cortex) initRuntimeConfig() (services.Service, error) {
@@ -225,7 +240,7 @@ func (t *Cortex) initDistributorService() (serv services.Service, err error) {
 	// ruler's dependency)
 	canJoinDistributorsRing := t.Cfg.isModuleEnabled(Distributor) || t.Cfg.isModuleEnabled(All)
 
-	t.Distributor, err = distributor.New(t.Cfg.Distributor, t.Cfg.IngesterClient, t.Overrides, t.Ring, canJoinDistributorsRing, prometheus.DefaultRegisterer, util_log.Logger)
+	t.Distributor, err = distributor.New(t.Cfg.Distributor, t.Cfg.IngesterClient, t.Overrides, t.PartitionRing, canJoinDistributorsRing, prometheus.DefaultRegisterer, util_log.Logger)
 	if err != nil {
 		return
 	}
@@ -775,6 +790,7 @@ func (t *Cortex) setupModuleManager() error {
 	mm.RegisterModule(RuntimeConfig, t.initRuntimeConfig, modules.UserInvisibleModule)
 	mm.RegisterModule(MemberlistKV, t.initMemberlistKV, modules.UserInvisibleModule)
 	mm.RegisterModule(Ring, t.initRing, modules.UserInvisibleModule)
+	mm.RegisterModule(PartitioningRing, t.initPartitioningRing, modules.UserInvisibleModule)
 	mm.RegisterModule(Overrides, t.initOverrides, modules.UserInvisibleModule)
 	mm.RegisterModule(OverridesExporter, t.initOverridesExporter)
 	mm.RegisterModule(Distributor, t.initDistributor)
@@ -806,10 +822,11 @@ func (t *Cortex) setupModuleManager() error {
 		MemberlistKV:             {API},
 		RuntimeConfig:            {API},
 		Ring:                     {API, RuntimeConfig, MemberlistKV},
+		PartitioningRing:         {Ring},
 		Overrides:                {RuntimeConfig},
 		OverridesExporter:        {RuntimeConfig},
 		Distributor:              {DistributorService, API, GrpcClientService},
-		DistributorService:       {Ring, Overrides},
+		DistributorService:       {Ring, PartitioningRing, Overrides},
 		Ingester:                 {IngesterService, Overrides, API},
 		IngesterService:          {Overrides, RuntimeConfig, MemberlistKV},
 		Flusher:                  {Overrides, API},

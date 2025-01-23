@@ -167,7 +167,7 @@ type mockedTokenGenerator struct {
 	RandomTokenGenerator
 }
 
-func (m *mockedTokenGenerator) GenerateTokens(d *Desc, id, zone string, numTokens int, force bool) []uint32 {
+func (m *mockedTokenGenerator) GenerateTokens(d genericRing, id, zone string, numTokens int, force bool) []uint32 {
 	m.called++
 	return m.RandomTokenGenerator.GenerateTokens(d, id, zone, numTokens, force)
 }

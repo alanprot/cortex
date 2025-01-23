@@ -388,6 +388,12 @@ func (a *API) RegisterRing(r *ring.Ring) {
 	a.RegisterRoute("/ring", r, false, "GET", "POST")
 }
 
+// RegisterRing registers the ring UI page associated with the distributor for writes.
+func (a *API) RegisterPartitioningRing(p *ring.PartitionRing) {
+	a.indexPage.AddLink(SectionAdminEndpoints, "/ingester/partition-ring", "Ingester Ring Status")
+	a.RegisterRoute("/ingester/partition-ring", p, false, "GET", "POST")
+}
+
 // RegisterStoreGateway registers the ring UI page associated with the store-gateway.
 func (a *API) RegisterStoreGateway(s *storegateway.StoreGateway) {
 	storegatewaypb.RegisterStoreGatewayServer(a.server.GRPC, s)
