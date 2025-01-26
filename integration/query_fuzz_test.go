@@ -490,13 +490,23 @@ func TestExpandedPostingsCacheFuzz(t *testing.T) {
 			err1, err2 error
 		}
 
-		queryStart := time.Now().Add(-time.Hour * 24)
-		queryEnd := time.Now()
 		cases := make([]*testCase, 0, 200)
 
 		for _, query := range queries {
-			res1, err1 := c1.QueryRange(query, queryStart, queryEnd, scrapeInterval)
-			res2, err2 := c2.QueryRange(query, queryStart, queryEnd, scrapeInterval)
+			fuzzyTiming := time.Minute * time.Duration(rand.Int31n(10))
+			queryStart := time.Now().Add(-time.Hour*24 + fuzzyTiming)
+			queryEnd := time.Now().Add(fuzzyTiming)
+			res1, err1 := c1.Query(query, queryEnd)
+			res2, err2 := c2.Query(query, queryEnd)
+			cases = append(cases, &testCase{
+				query: query,
+				res1:  res1,
+				res2:  res2,
+				err1:  err1,
+				err2:  err2,
+			})
+			res1, err1 = c1.QueryRange(query, queryStart, queryEnd, scrapeInterval)
+			res2, err2 = c2.QueryRange(query, queryStart, queryEnd, scrapeInterval)
 			cases = append(cases, &testCase{
 				query: query,
 				res1:  res1,
