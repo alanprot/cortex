@@ -42,6 +42,7 @@ type ExpandedPostingsCacheMetrics struct {
 	CacheEvicts         *prometheus.CounterVec
 	CacheMiss           *prometheus.CounterVec
 	NonCacheableQueries *prometheus.CounterVec
+	LazyMatcherQueries  prometheus.Counter
 }
 
 func NewPostingCacheMetrics(r prometheus.Registerer) *ExpandedPostingsCacheMetrics {
@@ -66,12 +67,23 @@ func NewPostingCacheMetrics(r prometheus.Registerer) *ExpandedPostingsCacheMetri
 			Name: "cortex_ingester_expanded_postings_non_cacheable_queries_total",
 			Help: "Total number of non cacheable queries.",
 		}, []string{"cache"}),
+		LazyMatcherQueries: promauto.With(r).NewCounter(prometheus.CounterOpts{
+			Name: "cortex_ingester_expanded_postings_lazy_matcher_queries_total",
+			Help: "Total number of queries that used lazy matcher evaluation on cache miss.",
+		}),
 	}
 }
 
 type TSDBPostingsCacheConfig struct {
 	Head   PostingsCacheConfig `yaml:"head" doc:"description=If enabled, ingesters will cache expanded postings for the head block. Only queries with with an equal matcher for metric __name__ are cached."`
 	Blocks PostingsCacheConfig `yaml:"blocks" doc:"description=If enabled, ingesters will cache expanded postings for the compacted blocks. The cache is shared between all blocks."`
+
+	// LazyMatcherMaxCardinality configures the maximum label cardinality threshold for
+	// deferring regex matchers on the head block. When a regex matcher targets a label with
+	// more unique values than this threshold, the matcher is applied lazily during series
+	// iteration instead of during postings lookup. This avoids expensive regex scans on
+	// high-cardinality labels when the head postings cache misses. 0 disables this optimization.
+	LazyMatcherMaxCardinality int `yaml:"lazy_matcher_max_cardinality"`
 
 	// The configurations below are used only for testing purpose
 	PostingsForMatchers func(ctx context.Context, ix tsdb.IndexReader, ms ...*labels.Matcher) (index.Postings, error) `yaml:"-"`
@@ -89,6 +101,7 @@ type PostingsCacheConfig struct {
 func (cfg *TSDBPostingsCacheConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	cfg.Head.RegisterFlagsWithPrefix(prefix, "head", f)
 	cfg.Blocks.RegisterFlagsWithPrefix(prefix, "block", f)
+	f.IntVar(&cfg.LazyMatcherMaxCardinality, prefix+"expanded_postings_cache.head.lazy-matcher-max-cardinality", 0, "Maximum label cardinality for deferring regex matchers on the head block. When a regex matcher targets a label with more unique values than this threshold, it is applied lazily during iteration instead of postings lookup. 0 disables.")
 }
 
 // RegisterFlagsWithPrefix adds the flags required to config this to the given FlagSet
@@ -139,6 +152,8 @@ type blocksPostingsForMatchersCache struct {
 	postingsForMatchersFunc func(ctx context.Context, ix tsdb.IndexReader, ms ...*labels.Matcher) (index.Postings, error)
 	timeNow                 func() time.Time
 
+	lazyMatcherMaxCardinality int
+
 	metrics    *ExpandedPostingsCacheMetrics
 	seedByHash *seedByHash
 }
@@ -158,13 +173,14 @@ func newBlocksPostingsForMatchersCache(userId string, cfg TSDBPostingsCacheConfi
 	}
 
 	return &blocksPostingsForMatchersCache{
-		headCache:               newLruCache[[]storage.SeriesRef](cfg.Head, "head", metrics, cfg.timeNow),
-		blocksCache:             newLruCache[[]storage.SeriesRef](cfg.Blocks, "block", metrics, cfg.timeNow),
-		postingsForMatchersFunc: cfg.PostingsForMatchers,
-		timeNow:                 cfg.timeNow,
-		metrics:                 metrics,
-		seedByHash:              seedByHash,
-		userId:                  userId,
+		headCache:                 newLruCache[[]storage.SeriesRef](cfg.Head, "head", metrics, cfg.timeNow),
+		blocksCache:               newLruCache[[]storage.SeriesRef](cfg.Blocks, "block", metrics, cfg.timeNow),
+		postingsForMatchersFunc:   cfg.PostingsForMatchers,
+		timeNow:                   cfg.timeNow,
+		lazyMatcherMaxCardinality: cfg.LazyMatcherMaxCardinality,
+		metrics:                   metrics,
+		seedByHash:                seedByHash,
+		userId:                    userId,
 	}
 }
 
@@ -232,6 +248,16 @@ func (c *blocksPostingsForMatchersCache) fetchPostings(blockID ulid.ULID, ix tsd
 			defer cancel()
 		}
 
+		// For head blocks, try to avoid expensive regex scans by splitting matchers:
+		// resolve postings with selective matchers only, then filter by regex lazily.
+		if isHeadBlock(blockID) && c.lazyMatcherMaxCardinality > 0 {
+			selectMs, lazyMs := splitMatchersForHead(fetchCtx, ix, ms, c.lazyMatcherMaxCardinality)
+			if len(lazyMs) > 0 {
+				c.metrics.LazyMatcherQueries.Inc()
+				return c.fetchWithLazyMatchers(fetchCtx, ix, selectMs, lazyMs)
+			}
+		}
+
 		postings, err := c.postingsForMatchersFunc(fetchCtx, ix, ms...)
 
 		if err == nil {
@@ -263,6 +289,60 @@ func (c *blocksPostingsForMatchersCache) result(ce *cacheEntryPromise[[]storage.
 			return index.NewListPostings(ce.v), ce.err
 		}
 	}
+}
+
+// fetchWithLazyMatchers resolves postings using only the selective matchers, then
+// filters the results by applying the lazy (regex) matchers per-series using
+// LabelValueFor. A per-value cache avoids running the same regex on the same value
+// more than once.
+func (c *blocksPostingsForMatchersCache) fetchWithLazyMatchers(ctx context.Context, ix tsdb.IndexReader, selectMs, lazyMs []*labels.Matcher) ([]storage.SeriesRef, int64, error) {
+	postings, err := c.postingsForMatchersFunc(ctx, ix, selectMs...)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ids, err := index.ExpandPostings(postings)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Per-matcher cache: label value -> match result
+	caches := make([]map[string]bool, len(lazyMs))
+	for i := range lazyMs {
+		caches[i] = make(map[string]bool)
+	}
+
+	filtered := ids[:0]
+	for _, id := range ids {
+		matches := true
+		for i, m := range lazyMs {
+			val, err := ix.LabelValueFor(ctx, id, m.Name)
+			if err != nil {
+				// Series doesn't have this label — treat as empty string
+				val = ""
+			}
+
+			if result, ok := caches[i][val]; ok {
+				if !result {
+					matches = false
+					break
+				}
+				continue
+			}
+
+			result := m.Matches(val)
+			caches[i][val] = result
+			if !result {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			filtered = append(filtered, id)
+		}
+	}
+
+	return filtered, int64(len(filtered) * 8), nil
 }
 
 func (c *blocksPostingsForMatchersCache) getSeedForMetricName(metricName string) string {
