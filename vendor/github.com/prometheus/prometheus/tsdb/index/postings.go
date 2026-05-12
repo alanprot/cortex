@@ -1037,3 +1037,10 @@ func (h *postingsWithIndexHeap) Pop() any {
 	*h = old[0 : n-1]
 	return x
 }
+
+func (p *MemPostings) LabelValuesCount(name string) int {
+	p.mtx.RLock()
+	n := len(p.lvs[name])
+	p.mtx.RUnlock()
+	return n
+}

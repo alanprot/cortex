@@ -615,3 +615,4 @@ func (q *HeadAndOOOChunkQuerier) Close() error {
 func (q *HeadAndOOOChunkQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.ChunkSeriesSet {
 	return selectChunkSeriesSet(ctx, sortSeries, hints, matchers, rangeHeadULID, q.index, q.chunkr, q.head.tombstones, q.mint, q.maxt)
 }
+func (ir *OOOCompactionHeadIndexReader) LabelValuesCount(name string) int { return 0 }

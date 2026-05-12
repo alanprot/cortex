@@ -107,6 +107,7 @@ type IndexReader interface {
 	// storage.ErrNotFound is returned as error.
 	LabelValueFor(ctx context.Context, id storage.SeriesRef, label string) (string, error)
 
+	LabelValuesCount(name string) int
 	// LabelNamesFor returns all the label names for the series referred to by the postings.
 	// The names returned are sorted.
 	LabelNamesFor(ctx context.Context, postings index.Postings) ([]string, error)
@@ -738,3 +739,5 @@ func clampInterval(a, b, mint, maxt int64) (int64, int64) {
 	}
 	return a, b
 }
+
+func (r blockIndexReader) LabelValuesCount(name string) int { return 0 }

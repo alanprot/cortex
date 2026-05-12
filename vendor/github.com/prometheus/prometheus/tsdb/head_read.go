@@ -614,3 +614,7 @@ func makeStopIterator(c chunkenc.Chunk, it chunkenc.Iterator, stopAfter int) chu
 		stopAfter: stopAfter,
 	}
 }
+
+func (h *headIndexReader) LabelValuesCount(name string) int {
+	return h.head.postings.LabelValuesCount(name)
+}

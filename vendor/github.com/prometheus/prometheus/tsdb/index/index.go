@@ -1919,3 +1919,4 @@ func (dec *Decoder) Series(b []byte, builder *labels.ScratchBuilder, chks *[]chu
 func yoloString(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
+func (r *Reader) LabelValuesCount(name string) int { return 0 }
