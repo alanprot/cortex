@@ -297,3 +297,176 @@ func generateValues(prefix string, count int) []string {
 	}
 	return vals
 }
+
+// TestRegexCostClass verifies the complexity classifier we use to choose
+// the cardinality:postings ratio gate. The classifier MUST agree with the
+// fast-path semantics in postingsForMatcher: regexes that prometheus would
+// short-circuit via setMatches or prefix-only matching are "simple" (cheap
+// per-call); everything else (multi-substring contains, captures, character
+// classes) is "complex" (expensive per-call, lazy iteration wins at lower
+// cardinality:postings ratio).
+func TestRegexCostClass(t *testing.T) {
+	cases := []struct {
+		name      string
+		matcher   *labels.Matcher
+		wantClass regexCost
+	}{
+		{
+			"literal alternation - SetMatches fast-path",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", "foo|bar|baz"),
+			regexCostSimple,
+		},
+		{
+			"single literal - SetMatches fast-path",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", "foo"),
+			regexCostSimple,
+		},
+		{
+			"prefix only - cheap containsInOrder fast-reject",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", "foo.*"),
+			regexCostSimple,
+		},
+		{
+			"single contains - moderate",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", ".*foo.*"),
+			regexCostSimple,
+		},
+		{
+			"multi-substring contains - complex",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", ".*foo.*bar.*"),
+			regexCostComplex,
+		},
+		{
+			"capture group + literal - complex",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", "(.+)-(.+)-(.+)"),
+			regexCostComplex,
+		},
+		{
+			"alternation of contains - complex",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", ".*a.*|.*b.*|.*c.*"),
+			regexCostComplex,
+		},
+		{
+			"plain anchored regex with character class - complex",
+			labels.MustNewMatcher(labels.MatchRegexp, "x", "^foo[0-9]+$"),
+			regexCostComplex,
+		},
+		{
+			"NotRegexp single contains - moderate",
+			labels.MustNewMatcher(labels.MatchNotRegexp, "x", ".*foo.*"),
+			regexCostSimple,
+		},
+		{
+			"NotRegexp multi-substring - complex",
+			labels.MustNewMatcher(labels.MatchNotRegexp, "x", ".*a.*b.*"),
+			regexCostComplex,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := regexCostClass(tc.matcher)
+			assert.Equal(t, tc.wantClass, got, "%s: got %v want %v", tc.matcher.String(), got, tc.wantClass)
+		})
+	}
+}
+
+// TestSplitMatchersForHead_CostRatio verifies the new cost-ratio gate.
+//
+// The original gate was `cardinality > minSelectPostings`, which incorrectly
+// deferred regex evaluation when LabelValueFor (per-series) cost would exceed
+// PostingsForLabelMatching (per-value) cost. The fixed gate is
+// `cardinality > minSelectPostings * ratio` where ratio depends on regex cost
+// class:
+//   - simple regex (prefix-only / single contains): ratio=6 (LabelValueFor is
+//     ~5x more expensive than a fast-path regex evaluation, +1 margin)
+//   - complex regex (multi-substring, capture, char class): ratio=2 (per-call
+//     regex cost is high enough that lazy wins at lower ratio)
+func TestSplitMatchersForHead_CostRatio(t *testing.T) {
+	const (
+		simpleRatio  = 6
+		complexRatio = 2
+	)
+	// Build an index where __name__=metric_a has 10000 series and pod has
+	// varying cardinalities to test the gate.
+	build := func(podCard int) *mockIndexReader {
+		return &mockIndexReader{
+			labelValues: map[string][]string{
+				"__name__": {"metric_a"},
+				"pod":      generateValues("pod-", podCard),
+			},
+			postingsCounts: map[string]int{
+				"__name__\xffmetric_a": 10000,
+			},
+		}
+	}
+
+	cases := []struct {
+		name           string
+		podCard        int
+		regex          string
+		simpleRatio    int
+		complexRatio   int
+		wantLazyCount  int
+	}{
+		{
+			// 20K cardinality, 10K postings → ratio = 2 → for SIMPLE regex this
+			// is below the 6x threshold; should NOT defer (this is the
+			// `balanced_select` failure mode the original code triggered).
+			name:          "simple regex 2x ratio - NOT deferred (cost gate)",
+			podCard:       20000,
+			regex:         "foo.*",
+			simpleRatio:   simpleRatio,
+			complexRatio:  complexRatio,
+			wantLazyCount: 0,
+		},
+		{
+			// 100K cardinality, 10K postings → ratio = 10 → above 6x; defer.
+			name:          "simple regex 10x ratio - deferred",
+			podCard:       100000,
+			regex:         "foo.*",
+			simpleRatio:   simpleRatio,
+			complexRatio:  complexRatio,
+			wantLazyCount: 1,
+		},
+		{
+			// 25K cardinality, 10K postings → ratio = 2.5 → above complex
+			// threshold of 2; defer.
+			name:          "complex regex 2.5x ratio - deferred",
+			podCard:       25000,
+			regex:         ".*foo.*bar.*",
+			simpleRatio:   simpleRatio,
+			complexRatio:  complexRatio,
+			wantLazyCount: 1,
+		},
+		{
+			// 15K cardinality, 10K postings → ratio = 1.5 → below complex
+			// threshold of 2; do NOT defer.
+			name:          "complex regex 1.5x ratio - NOT deferred",
+			podCard:       15000,
+			regex:         ".*foo.*bar.*",
+			simpleRatio:   simpleRatio,
+			complexRatio:  complexRatio,
+			wantLazyCount: 0,
+		},
+	}
+
+	ctx := context.Background()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ir := build(tc.podCard)
+			matchers := []*labels.Matcher{
+				labels.MustNewMatcher(labels.MatchEqual, "__name__", "metric_a"),
+				labels.MustNewMatcher(labels.MatchRegexp, "pod", tc.regex),
+			}
+			cfg := lazyMatcherConfig{
+				MaxCardinality: 1000, // engage threshold (< all podCard above)
+				SimpleRatio:    tc.simpleRatio,
+				ComplexRatio:   tc.complexRatio,
+			}
+			_, lazyMs := splitMatchersForHeadWithConfig(ctx, ir, matchers, cfg)
+			assert.Len(t, lazyMs, tc.wantLazyCount,
+				"podCard=%d regex=%q: lazyCount mismatch", tc.podCard, tc.regex)
+		})
+	}
+}

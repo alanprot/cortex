@@ -2,6 +2,7 @@ package tsdb
 
 import (
 	"context"
+	"strings"
 
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
@@ -9,20 +10,202 @@ import (
 	"github.com/prometheus/prometheus/tsdb/index"
 )
 
-// splitMatchersForHead separates matchers into those used for postings lookup and those
-// applied lazily during iteration. For the head block, regex matchers on high-cardinality
-// labels are deferred to avoid expensive regex scans on cache miss, since the postings
-// cache is frequently invalidated by new series.
+// regexCost classifies how expensive per-call evaluation of a regex matcher
+// is, relative to a single LabelValueFor call. We use this to choose the
+// cardinality:postings ratio gate that decides whether to defer a regex
+// matcher to lazy iteration on the head block.
 //
-// A matcher is deferred only when:
-//   - The query already contains a __name__ equality matcher (to ensure selectivity)
-//   - The matcher is a regex or negative regex on a non-__name__ label
-//   - The label's cardinality exceeds the configured threshold
-//   - The estimated series count from the selective matchers is smaller than the regex
-//     label's cardinality, ensuring the lazy iteration is cheaper than the full scan
+// Calibration is empirical, from BenchmarkIngester_LazyPosting:
+//   - LabelValueFor on the head ≈ 1µs per call (lock + map lookup + label parse)
+//   - simple regex eval (prefix-only / single contains via FastRegexMatcher
+//     fast paths) ≈ 200ns per call
+//   - complex regex eval (multi-substring containsInOrder, capture groups,
+//     character classes - falls through to RE2 or multi-Index) ≈ 1µs+ per call
+//
+// Cost model:
+//   eager_cost  ≈ cardinality        * regex_per_call_cost
+//   lazy_cost   ≈ selective_postings * (LabelValueFor_cost + regex_per_call_cost)
+//
+// Lazy is a win when:
+//   selective_postings * (LV + regex) < cardinality * regex
+//   ⇒ cardinality / selective_postings > (LV + regex) / regex
+//
+// For simple regex (regex ≈ 200ns, LV ≈ 1µs): ratio > 6 (with margin → 6).
+// For complex regex (regex ≈ 1µs, LV ≈ 1µs):  ratio > 2.
+type regexCost int
+
+const (
+	regexCostUnknown regexCost = iota
+	// regexCostSimple covers regexes that the FastRegexMatcher fast-paths via
+	// setMatches, prefix anchoring, suffix anchoring, or single-contains. Per-call
+	// cost is dominated by the underlying string op, not RE2 evaluation.
+	regexCostSimple
+	// regexCostComplex covers everything else: multi-substring contains
+	// (.*a.*b.*), alternation of contains, capture groups with siblings,
+	// character classes, lookaheads, etc. Per-call cost includes the full RE2
+	// fallback or multi-step containsInOrder.
+	regexCostComplex
+)
+
+// regexCostClass returns the per-call cost class of a regex matcher.
+//
+// Notes:
+//   - Matchers with non-empty SetMatches() are short-circuited by the
+//     postingsForMatcher fast-path and never reach our lazy code, but we
+//     classify them as simple for safety.
+//   - Matchers with a non-empty Prefix() are also fast-pathed differently
+//     in postingsForLabelMatching (containsInOrder fast-reject), so they're
+//     classified as simple.
+//   - Negative regex (MatchNotRegexp) is classified the same as MatchRegexp
+//     since the per-call evaluation cost is identical.
+func regexCostClass(m *labels.Matcher) regexCost {
+	if m.Type != labels.MatchRegexp && m.Type != labels.MatchNotRegexp {
+		return regexCostUnknown
+	}
+
+	// Already fast-pathed by postingsForMatcher (we shouldn't reach here for
+	// these, but classify defensively).
+	if len(m.SetMatches()) > 0 {
+		return regexCostSimple
+	}
+
+	v := m.GetRegexString()
+
+	// Prefix-only regex (e.g. `foo.*`): the FastRegexMatcher uses HasPrefix
+	// per call. But a regex like `^foo[0-9]+$` ALSO has Prefix()=="foo"
+	// while requiring full RE2 evaluation on positive matches. We can
+	// distinguish by checking the regex string: the prefix is "simple" only
+	// when the remainder of the regex is trivially-matching (.* or empty).
+	if p := m.Prefix(); p != "" {
+		if isPureLiteralPrefix(v, p) {
+			return regexCostSimple
+		}
+		// Prefix exists but the remainder is non-trivial — RE2 still runs
+		// on positive matches.
+		return regexCostComplex
+	}
+
+	// At this point the regex has no setMatches and no prefix. Use the regex
+	// string to detect the remaining "simple" shapes the FastRegexMatcher
+	// optimizes specially.
+	switch {
+	case isSingleContainsRegex(v):
+		// .*foo.* — vanilla extracts m.contains=["foo"], runs containsInOrder
+		// once per value (single strings.Index call). Per-call ≈ regex cost.
+		return regexCostSimple
+	case isPureSuffixRegex(v):
+		// .*foo — extracted as m.suffix; HasSuffix per call.
+		return regexCostSimple
+	}
+
+	return regexCostComplex
+}
+
+// isPureLiteralPrefix returns true when the regex string is just <prefix>
+// optionally followed by `.*` or `.*$` (trivial tail). This is the
+// pattern shape the FastRegexMatcher fully fast-paths via HasPrefix
+// without falling through to RE2.
+func isPureLiteralPrefix(regex, prefix string) bool {
+	// Strip optional ^ anchor.
+	r := regex
+	if strings.HasPrefix(r, "^") {
+		r = r[1:]
+	}
+	// The regex must start with the literal prefix.
+	if !strings.HasPrefix(r, prefix) {
+		return false
+	}
+	rest := r[len(prefix):]
+	// Strip optional $ anchor.
+	rest = strings.TrimSuffix(rest, "$")
+	// Trailing must be empty (anchored exact prefix), `.*` (any tail), or
+	// `.+` (any non-empty tail). Anything else (character class, alternation,
+	// nested groups, additional literals) requires the full regex engine.
+	return rest == "" || rest == ".*" || rest == ".+"
+}
+
+// isSingleContainsRegex returns true for `.*<literal>.*` patterns where
+// <literal> contains no regex metacharacters.
+func isSingleContainsRegex(s string) bool {
+	if !strings.HasPrefix(s, ".*") || !strings.HasSuffix(s, ".*") || len(s) <= 4 {
+		return false
+	}
+	inner := s[2 : len(s)-2]
+	return inner != "" && !containsRegexMeta(inner)
+}
+
+// isPureSuffixRegex returns true for `.*<literal>` patterns where <literal>
+// contains no regex metacharacters and the pattern has no trailing .*
+// (otherwise it's single-contains).
+func isPureSuffixRegex(s string) bool {
+	if !strings.HasPrefix(s, ".*") || strings.HasSuffix(s, ".*") {
+		return false
+	}
+	return !containsRegexMeta(s[2:])
+}
+
+// containsRegexMeta reports whether s contains any regex metacharacter.
+func containsRegexMeta(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.', '+', '*', '?', '|', '(', ')', '[', ']', '{', '}', '\\', '^', '$':
+			return true
+		}
+	}
+	return false
+}
+
+// lazyMatcherConfig configures the cost-ratio gates used by
+// splitMatchersForHeadWithConfig. Use defaultLazyMatcherConfig to get the
+// calibrated defaults.
+type lazyMatcherConfig struct {
+	// MaxCardinality is the floor cardinality below which a label is never
+	// considered for lazy evaluation, regardless of selectivity.
+	MaxCardinality int
+	// SimpleRatio is the cardinality:postings ratio above which simple regex
+	// matchers are deferred. Tuned empirically; see regexCostClass docs.
+	SimpleRatio int
+	// ComplexRatio is the cardinality:postings ratio above which complex regex
+	// matchers are deferred.
+	ComplexRatio int
+}
+
+// defaultLazyMatcherConfig returns the empirically calibrated defaults.
+// Callers may override individual fields before passing to
+// splitMatchersForHeadWithConfig.
+func defaultLazyMatcherConfig(maxCardinality int) lazyMatcherConfig {
+	return lazyMatcherConfig{
+		MaxCardinality: maxCardinality,
+		SimpleRatio:    6,
+		ComplexRatio:   2,
+	}
+}
+
+// splitMatchersForHead is the public entry point — it preserves the original
+// signature for backwards compatibility and uses the default cost ratios.
 func splitMatchersForHead(ctx context.Context, ix prom_tsdb.IndexReader, ms []*labels.Matcher, maxCardinality int) (selectMatchers, lazyMatchers []*labels.Matcher) {
-	if maxCardinality <= 0 || len(ms) < 2 {
+	return splitMatchersForHeadWithConfig(ctx, ix, ms, defaultLazyMatcherConfig(maxCardinality))
+}
+
+// splitMatchersForHeadWithConfig separates matchers into those used for postings
+// lookup and those applied lazily during iteration, using the configured cost
+// ratios. See lazyMatcherConfig.
+//
+// A matcher is deferred only when ALL of:
+//   - The query already contains a __name__ equality matcher (anchors selectivity)
+//   - The matcher is a regex or negative regex on a non-__name__ label
+//   - The label's cardinality exceeds MaxCardinality
+//   - cardinality > minSelectPostings * ratio, where ratio depends on the
+//     regex's per-call cost class (see regexCostClass)
+func splitMatchersForHeadWithConfig(ctx context.Context, ix prom_tsdb.IndexReader, ms []*labels.Matcher, cfg lazyMatcherConfig) (selectMatchers, lazyMatchers []*labels.Matcher) {
+	if cfg.MaxCardinality <= 0 || len(ms) < 2 {
 		return ms, nil
+	}
+	if cfg.SimpleRatio < 1 {
+		cfg.SimpleRatio = 1
+	}
+	if cfg.ComplexRatio < 1 {
+		cfg.ComplexRatio = 1
 	}
 
 	hasMetricNameMatcher := false
@@ -41,6 +224,7 @@ func splitMatchersForHead(ctx context.Context, ix prom_tsdb.IndexReader, ms []*l
 	type regexCandidate struct {
 		matcher     *labels.Matcher
 		cardinality int
+		cost        regexCost
 	}
 
 	var candidates []regexCandidate
@@ -57,12 +241,16 @@ func splitMatchersForHead(ctx context.Context, ix prom_tsdb.IndexReader, ms []*l
 
 			// Check if the label has high cardinality.
 			vals, err := ix.LabelValues(ctx, m.Name, (*storage.LabelHints)(nil))
-			if err != nil || len(vals) <= maxCardinality {
+			if err != nil || len(vals) <= cfg.MaxCardinality {
 				selectMatchers = append(selectMatchers, m)
 				continue
 			}
 
-			candidates = append(candidates, regexCandidate{matcher: m, cardinality: len(vals)})
+			candidates = append(candidates, regexCandidate{
+				matcher:     m,
+				cardinality: len(vals),
+				cost:        regexCostClass(m),
+			})
 			continue
 		}
 
@@ -76,14 +264,18 @@ func splitMatchersForHead(ctx context.Context, ix prom_tsdb.IndexReader, ms []*l
 		}
 	}
 
-	// Only defer if the selective matchers produce fewer series than the regex
-	// label's cardinality (i.e., lazy iteration is cheaper than full scan).
 	if len(candidates) == 0 || minSelectPostings == 0 {
 		return ms, nil
 	}
 
 	for _, c := range candidates {
-		if c.cardinality > minSelectPostings {
+		ratio := cfg.SimpleRatio
+		if c.cost == regexCostComplex {
+			ratio = cfg.ComplexRatio
+		}
+		// Defer only when lazy iteration is cheaper than the eager scan.
+		// Cost model: cardinality * regex_per_call > selective_postings * (LV + regex).
+		if c.cardinality > minSelectPostings*ratio {
 			lazyMatchers = append(lazyMatchers, c.matcher)
 		} else {
 			selectMatchers = append(selectMatchers, c.matcher)

@@ -85,6 +85,18 @@ type TSDBPostingsCacheConfig struct {
 	// high-cardinality labels when the head postings cache misses. 0 disables this optimization.
 	LazyMatcherMaxCardinality int `yaml:"lazy_matcher_max_cardinality"`
 
+	// LazyMatcherSimpleCostRatio is the cardinality:postings ratio above which a
+	// regex matcher with a simple per-call cost (prefix-only, single contains,
+	// single suffix) is deferred to lazy iteration. Tuned empirically — see
+	// regexCostClass for derivation. Defaults to 6 when unset.
+	LazyMatcherSimpleCostRatio int `yaml:"lazy_matcher_simple_cost_ratio"`
+
+	// LazyMatcherComplexCostRatio is the cardinality:postings ratio above which a
+	// regex matcher with a complex per-call cost (multi-substring contains,
+	// capture groups with literals, character classes) is deferred. Defaults to 2
+	// when unset.
+	LazyMatcherComplexCostRatio int `yaml:"lazy_matcher_complex_cost_ratio"`
+
 	// The configurations below are used only for testing purpose
 	PostingsForMatchers func(ctx context.Context, ix tsdb.IndexReader, ms ...*labels.Matcher) (index.Postings, error) `yaml:"-"`
 	SeedSize            int                                                                                           `yaml:"-"`
@@ -102,6 +114,8 @@ func (cfg *TSDBPostingsCacheConfig) RegisterFlagsWithPrefix(prefix string, f *fl
 	cfg.Head.RegisterFlagsWithPrefix(prefix, "head", f)
 	cfg.Blocks.RegisterFlagsWithPrefix(prefix, "block", f)
 	f.IntVar(&cfg.LazyMatcherMaxCardinality, prefix+"expanded_postings_cache.head.lazy-matcher-max-cardinality", 0, "Maximum label cardinality for deferring regex matchers on the head block. When a regex matcher targets a label with more unique values than this threshold, it is applied lazily during iteration instead of postings lookup. 0 disables.")
+	f.IntVar(&cfg.LazyMatcherSimpleCostRatio, prefix+"expanded_postings_cache.head.lazy-matcher-simple-cost-ratio", 6, "Cardinality:postings ratio above which a simple regex (prefix-only, single contains) is deferred to lazy iteration. Lower = more aggressive deferral. Calibrated empirically; defaults to 6.")
+	f.IntVar(&cfg.LazyMatcherComplexCostRatio, prefix+"expanded_postings_cache.head.lazy-matcher-complex-cost-ratio", 2, "Cardinality:postings ratio above which a complex regex (multi-substring, capture groups, character classes) is deferred. Lower = more aggressive deferral. Calibrated empirically; defaults to 2.")
 }
 
 // RegisterFlagsWithPrefix adds the flags required to config this to the given FlagSet
@@ -152,7 +166,7 @@ type blocksPostingsForMatchersCache struct {
 	postingsForMatchersFunc func(ctx context.Context, ix tsdb.IndexReader, ms ...*labels.Matcher) (index.Postings, error)
 	timeNow                 func() time.Time
 
-	lazyMatcherMaxCardinality int
+	lazyMatcherCfg lazyMatcherConfig
 
 	metrics    *ExpandedPostingsCacheMetrics
 	seedByHash *seedByHash
@@ -173,14 +187,18 @@ func newBlocksPostingsForMatchersCache(userId string, cfg TSDBPostingsCacheConfi
 	}
 
 	return &blocksPostingsForMatchersCache{
-		headCache:                 newLruCache[[]storage.SeriesRef](cfg.Head, "head", metrics, cfg.timeNow),
-		blocksCache:               newLruCache[[]storage.SeriesRef](cfg.Blocks, "block", metrics, cfg.timeNow),
-		postingsForMatchersFunc:   cfg.PostingsForMatchers,
-		timeNow:                   cfg.timeNow,
-		lazyMatcherMaxCardinality: cfg.LazyMatcherMaxCardinality,
-		metrics:                   metrics,
-		seedByHash:                seedByHash,
-		userId:                    userId,
+		headCache:               newLruCache[[]storage.SeriesRef](cfg.Head, "head", metrics, cfg.timeNow),
+		blocksCache:             newLruCache[[]storage.SeriesRef](cfg.Blocks, "block", metrics, cfg.timeNow),
+		postingsForMatchersFunc: cfg.PostingsForMatchers,
+		timeNow:                 cfg.timeNow,
+		lazyMatcherCfg: lazyMatcherConfig{
+			MaxCardinality: cfg.LazyMatcherMaxCardinality,
+			SimpleRatio:    cfg.LazyMatcherSimpleCostRatio,
+			ComplexRatio:   cfg.LazyMatcherComplexCostRatio,
+		},
+		metrics:    metrics,
+		seedByHash: seedByHash,
+		userId:     userId,
 	}
 }
 
@@ -250,8 +268,8 @@ func (c *blocksPostingsForMatchersCache) fetchPostings(blockID ulid.ULID, ix tsd
 
 		// For head blocks, try to avoid expensive regex scans by splitting matchers:
 		// resolve postings with selective matchers only, then filter by regex lazily.
-		if isHeadBlock(blockID) && c.lazyMatcherMaxCardinality > 0 {
-			selectMs, lazyMs := splitMatchersForHead(fetchCtx, ix, ms, c.lazyMatcherMaxCardinality)
+		if isHeadBlock(blockID) && c.lazyMatcherCfg.MaxCardinality > 0 {
+			selectMs, lazyMs := splitMatchersForHeadWithConfig(fetchCtx, ix, ms, c.lazyMatcherCfg)
 			if len(lazyMs) > 0 {
 				c.metrics.LazyMatcherQueries.Inc()
 				return c.fetchWithLazyMatchers(fetchCtx, ix, selectMs, lazyMs)
