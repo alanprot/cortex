@@ -97,7 +97,7 @@ func BenchmarkIngester_LazyPosting(b *testing.B) {
 			podSharedAcrossName: false,
 			matchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "metric_0"),
-				// .*foo.*bar.* — this is the MIMIR_1_SIMPLE_CONCAT shape; complex per-call
+				// .*foo.*bar.* — multi-substring contains; complex per-call
 				labels.MustNewMatcher(labels.MatchRegexp, "pod", ".*pod.*1.*"),
 			},
 			expectMatches: true,
@@ -110,7 +110,7 @@ func BenchmarkIngester_LazyPosting(b *testing.B) {
 			podSharedAcrossName: false,
 			matchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, "metric_0"),
-				// (foo|bar).* — MIMIR_3_CAPTURE_NO_LIT shape, common in envoy_authority
+				// (foo|bar).* — capture group alternation, common in envoy_authority
 				labels.MustNewMatcher(labels.MatchRegexp, "pod", "(pod-1|pod-2).*"),
 			},
 			expectMatches: true,

@@ -120,10 +120,7 @@ func regexCostClass(m *labels.Matcher) regexCost {
 // without falling through to RE2.
 func isPureLiteralPrefix(regex, prefix string) bool {
 	// Strip optional ^ anchor.
-	r := regex
-	if strings.HasPrefix(r, "^") {
-		r = r[1:]
-	}
+	r := strings.TrimPrefix(regex, "^")
 	// The regex must start with the literal prefix.
 	if !strings.HasPrefix(r, prefix) {
 		return false
