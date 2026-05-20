@@ -18,7 +18,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/util/services"
 	"github.com/cortexproject/cortex/pkg/util/test"
 	"github.com/thanos-io/thanos/pkg/store/storepb"
-)// BenchmarkIngester_LazyPosting exercises the lazy-matcher-max-cardinality
+) // BenchmarkIngester_LazyPosting exercises the lazy-matcher-max-cardinality
 // optimization on the head block cache miss path.
 //
 // The scenarios are taken from the stripe-rules corpus analysis:
@@ -55,8 +55,8 @@ func BenchmarkIngester_LazyPosting(b *testing.B) {
 	}{
 		{
 			name:                "small_select_huge_regex_label",
-			nameValues:          50,    // 50 distinct metric names
-			seriesPerName:       2000,  // each metric has 2000 series → __name__=cpu selects 2K of 100K
+			nameValues:          50,   // 50 distinct metric names
+			seriesPerName:       2000, // each metric has 2000 series → __name__=cpu selects 2K of 100K
 			podCardinality:      100000,
 			podSharedAcrossName: false,
 			matchers: []*labels.Matcher{
@@ -67,7 +67,7 @@ func BenchmarkIngester_LazyPosting(b *testing.B) {
 		},
 		{
 			name:                "balanced_select_huge_regex_label",
-			nameValues:          2,    // only 2 metric names
+			nameValues:          2,     // only 2 metric names
 			seriesPerName:       50000, // each has 50K series → __name__= selects 50K of 100K
 			podCardinality:      100000,
 			podSharedAcrossName: false,

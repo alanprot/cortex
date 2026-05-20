@@ -23,18 +23,23 @@ import (
 //     character classes - falls through to RE2 or multi-Index) ≈ 1µs+ per call
 //
 // Cost model:
-//   eager_cost  ≈ cardinality        * regex_per_call_cost
-//   lazy_cost   ≈ selective_postings * (LabelValueFor_cost + regex_per_call_cost)
+//
+//	eager_cost  ≈ cardinality        * regex_per_call_cost
+//	lazy_cost   ≈ selective_postings * (LabelValueFor_cost + regex_per_call_cost)
 //
 // Lazy is a win when:
-//   selective_postings * (LV + regex) < cardinality * regex
-//   ⇒ cardinality / selective_postings > (LV + regex) / regex
+//
+//	selective_postings * (LV + regex) < cardinality * regex
+//	⇒ cardinality / selective_postings > (LV + regex) / regex
 //
 // For simple regex (regex ≈ 200ns, LV ≈ 1µs): ratio > 6 (with margin → 6).
 // For complex regex (regex ≈ 1µs, LV ≈ 1µs):  ratio > 2.
 type regexCost int
 
 const (
+	// regexCostUnknown is a defensive sentinel returned by regexCostClass for
+	// non-regex matchers. Production code never reaches this path (callers
+	// type-check before invoking).
 	regexCostUnknown regexCost = iota
 	// regexCostSimple covers regexes that the FastRegexMatcher fast-paths via
 	// setMatches, prefix anchoring, suffix anchoring, or single-contains. Per-call
@@ -45,6 +50,14 @@ const (
 	// character classes, lookaheads, etc. Per-call cost includes the full RE2
 	// fallback or multi-step containsInOrder.
 	regexCostComplex
+)
+
+// Calibrated default cost ratios. Used both as struct field defaults and by
+// the flag registration in TSDBPostingsCacheConfig.RegisterFlagsWithPrefix.
+// See regexCost docstring for derivation.
+const (
+	defaultSimpleCostRatio  = 6
+	defaultComplexCostRatio = 2
 )
 
 // regexCostClass returns the per-call cost class of a regex matcher.
@@ -156,35 +169,22 @@ func containsRegexMeta(s string) bool {
 }
 
 // lazyMatcherConfig configures the cost-ratio gates used by
-// splitMatchersForHeadWithConfig. Use defaultLazyMatcherConfig to get the
-// calibrated defaults.
+// splitMatchersForHeadWithConfig. Zero-valued SimpleRatio/ComplexRatio
+// fields are treated as "use the calibrated default" (defaultSimpleCostRatio
+// and defaultComplexCostRatio respectively), NOT as "no margin" — guarding
+// callers who construct the config struct programmatically without going
+// through flag registration.
 type lazyMatcherConfig struct {
 	// MaxCardinality is the floor cardinality below which a label is never
 	// considered for lazy evaluation, regardless of selectivity.
 	MaxCardinality int
 	// SimpleRatio is the cardinality:postings ratio above which simple regex
 	// matchers are deferred. Tuned empirically; see regexCostClass docs.
+	// 0 means "use defaultSimpleCostRatio".
 	SimpleRatio int
 	// ComplexRatio is the cardinality:postings ratio above which complex regex
-	// matchers are deferred.
+	// matchers are deferred. 0 means "use defaultComplexCostRatio".
 	ComplexRatio int
-}
-
-// defaultLazyMatcherConfig returns the empirically calibrated defaults.
-// Callers may override individual fields before passing to
-// splitMatchersForHeadWithConfig.
-func defaultLazyMatcherConfig(maxCardinality int) lazyMatcherConfig {
-	return lazyMatcherConfig{
-		MaxCardinality: maxCardinality,
-		SimpleRatio:    6,
-		ComplexRatio:   2,
-	}
-}
-
-// splitMatchersForHead is the public entry point — it preserves the original
-// signature for backwards compatibility and uses the default cost ratios.
-func splitMatchersForHead(ctx context.Context, ix prom_tsdb.IndexReader, ms []*labels.Matcher, maxCardinality int) (selectMatchers, lazyMatchers []*labels.Matcher) {
-	return splitMatchersForHeadWithConfig(ctx, ix, ms, defaultLazyMatcherConfig(maxCardinality))
 }
 
 // splitMatchersForHeadWithConfig separates matchers into those used for postings
@@ -201,11 +201,15 @@ func splitMatchersForHeadWithConfig(ctx context.Context, ix prom_tsdb.IndexReade
 	if cfg.MaxCardinality <= 0 || len(ms) < 2 {
 		return ms, nil
 	}
+	// Treat zero-valued ratios as "use the calibrated default", not as
+	// "ratio of 1" (which would silently fall back to the original broken
+	// gate). This protects programmatic callers who construct the config
+	// without flag-registration defaults.
 	if cfg.SimpleRatio < 1 {
-		cfg.SimpleRatio = 1
+		cfg.SimpleRatio = defaultSimpleCostRatio
 	}
 	if cfg.ComplexRatio < 1 {
-		cfg.ComplexRatio = 1
+		cfg.ComplexRatio = defaultComplexCostRatio
 	}
 
 	hasMetricNameMatcher := false

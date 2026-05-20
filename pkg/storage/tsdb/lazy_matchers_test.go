@@ -133,7 +133,14 @@ func TestSplitMatchersForHead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			selectMs, lazyMs := splitMatchersForHead(ctx, ir, tt.matchers, tt.maxCardinality)
+			selectMs, lazyMs := splitMatchersForHeadWithConfig(ctx, ir, tt.matchers, lazyMatcherConfig{
+				MaxCardinality: tt.maxCardinality,
+				// Use ratio=1 so this test continues to assert on the old
+				// (cardinality > minSelectPostings) gate semantics. Cost-ratio
+				// behavior is covered separately in TestSplitMatchersForHead_CostRatio.
+				SimpleRatio:  1,
+				ComplexRatio: 1,
+			})
 			assert.Len(t, selectMs, tt.wantSelect, "select matchers count")
 			assert.Len(t, lazyMs, tt.wantLazy, "lazy matchers count")
 
@@ -371,8 +378,38 @@ func TestRegexCostClass(t *testing.T) {
 	}
 }
 
-// TestSplitMatchersForHead_CostRatio verifies the new cost-ratio gate.
-//
+// TestSplitMatchersForHead_ZeroRatioUsesDefaults verifies that programmatic
+// callers who construct lazyMatcherConfig without going through flag
+// registration get the calibrated defaults (6 and 2), NOT a clamped 1 (which
+// would silently re-introduce the original broken gate). See the regexCost
+// docstring for the cost model.
+func TestSplitMatchersForHead_ZeroRatioUsesDefaults(t *testing.T) {
+	ctx := context.Background()
+	ir := &mockIndexReader{
+		labelValues: map[string][]string{
+			"__name__": {"metric_a"},
+			"pod":      generateValues("pod-", 30000),
+		},
+		postingsCounts: map[string]int{
+			"__name__\xffmetric_a": 10000,
+		},
+	}
+	matchers := []*labels.Matcher{
+		labels.MustNewMatcher(labels.MatchEqual, "__name__", "metric_a"),
+		// simple regex: prefix-only.
+		labels.MustNewMatcher(labels.MatchRegexp, "pod", "foo.*"),
+	}
+	// Cardinality:postings ratio = 30000/10000 = 3.
+	// With ratio=1 (clamped), 3 > 1 → would defer.
+	// With default ratio=6, 3 > 6 is false → must NOT defer.
+	cfg := lazyMatcherConfig{
+		MaxCardinality: 1000,
+		// SimpleRatio and ComplexRatio left zero — must use defaults.
+	}
+	_, lazyMs := splitMatchersForHeadWithConfig(ctx, ir, matchers, cfg)
+	assert.Len(t, lazyMs, 0, "zero SimpleRatio must default to %d, not be clamped to 1", defaultSimpleCostRatio)
+}
+
 // The original gate was `cardinality > minSelectPostings`, which incorrectly
 // deferred regex evaluation when LabelValueFor (per-series) cost would exceed
 // PostingsForLabelMatching (per-value) cost. The fixed gate is
@@ -402,12 +439,12 @@ func TestSplitMatchersForHead_CostRatio(t *testing.T) {
 	}
 
 	cases := []struct {
-		name           string
-		podCard        int
-		regex          string
-		simpleRatio    int
-		complexRatio   int
-		wantLazyCount  int
+		name          string
+		podCard       int
+		regex         string
+		simpleRatio   int
+		complexRatio  int
+		wantLazyCount int
 	}{
 		{
 			// 20K cardinality, 10K postings → ratio = 2 → for SIMPLE regex this
