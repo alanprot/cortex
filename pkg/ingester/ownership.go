@@ -29,6 +29,7 @@ type ringOwnershipDelegate struct {
 
 	// Set before ring is stored.
 	instanceID string
+	writeOp    ring.Operation
 
 	// Bumped after each ring update that can change this ingester's shares.
 	generation atomic.Uint64
@@ -76,11 +77,19 @@ func (d *ringOwnershipDelegate) sharesMayChange(next *ring.Desc) bool {
 			d.crossZoneTokens = hasCrossZoneTokens(next)
 			return true
 		}
-		if before.State != instance.State && (instance.Zone == zone || d.crossZoneTokens) {
+		if (instance.Zone == zone || d.crossZoneTokens) && d.stateChangeMovesShares(before.State, instance.State) {
 			stateChanged = true
 		}
 	}
 	return stateChanged
+}
+
+// stateChangeMovesShares reports whether an instance going from prev to next
+// can move a share: by changing whether the write operation extends past it,
+// which moves ranges, or whether it is READONLY, which shard picks skip.
+func (d *ringOwnershipDelegate) stateChangeMovesShares(prev, next ring.InstanceState) bool {
+	return d.writeOp.ShouldExtendReplicaSetOnState(prev) != d.writeOp.ShouldExtendReplicaSetOnState(next) ||
+		(prev == ring.READONLY) != (next == ring.READONLY)
 }
 
 // hasCrossZoneTokens reports whether instances of two zones share a token.
@@ -159,13 +168,17 @@ type tenantShare struct {
 	zones      int
 }
 
-func newOwnershipRefresher(r *ring.Ring, instanceID string, extendWrites, shuffleShardingEnabled bool, limits *validation.Overrides, registerer prometheus.Registerer, generation func() uint64) *ownershipRefresher {
-	// Must match the operation the distributor writes with, or the shares
-	// would not describe where series are sent.
-	writeOp := ring.WriteNoExtend
+// ownershipWriteOp returns the operation the distributor writes with. Shares
+// must be computed for it, or they would not describe where series are sent.
+func ownershipWriteOp(extendWrites bool) ring.Operation {
 	if extendWrites {
-		writeOp = ring.Write
+		return ring.Write
 	}
+	return ring.WriteNoExtend
+}
+
+func newOwnershipRefresher(r *ring.Ring, instanceID string, extendWrites, shuffleShardingEnabled bool, limits *validation.Overrides, registerer prometheus.Registerer, generation func() uint64) *ownershipRefresher {
+	writeOp := ownershipWriteOp(extendWrites)
 	return &ownershipRefresher{
 		ring:                   r,
 		instanceID:             instanceID,
