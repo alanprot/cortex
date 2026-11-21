@@ -70,6 +70,20 @@ func (r *Ring) invalidateZonalOwnership() {
 	r.zonalOwnershipByOp = nil
 }
 
+// invalidateZonalOwnershipOnStateChange drops the ownership cached for each
+// operation that extends the replica set past exactly one of the two states:
+// only those state changes move ranges. The caller must hold r.mtx for writing.
+func (r *Ring) invalidateZonalOwnershipOnStateChange(prev, next InstanceState) {
+	if prev == next {
+		return
+	}
+	for op := range r.zonalOwnershipByOp {
+		if op.ShouldExtendReplicaSetOnState(prev) != op.ShouldExtendReplicaSetOnState(next) {
+			delete(r.zonalOwnershipByOp, op)
+		}
+	}
+}
+
 // computeZonalOwnership must be called with r.mtx held.
 func (r *Ring) computeZonalOwnership(op Operation) map[string]float64 {
 	ownership := make(map[string]float64, len(r.ringDesc.Ingesters))

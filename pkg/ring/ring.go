@@ -377,8 +377,8 @@ func (r *Ring) updateRingState(ringDesc *Desc) {
 		// when watching the ring for updates).
 		r.mtx.Lock()
 		r.ringDesc = ringDesc
-		if rc != Equal {
-			r.invalidateZonalOwnership()
+		for id, instance := range ringDesc.Ingesters {
+			r.invalidateZonalOwnershipOnStateChange(prevRing.Ingesters[id].State, instance.State)
 		}
 		if rc == EqualButReadOnly && r.shuffledSubringCache != nil {
 			// Invalidate all cached subrings.
@@ -1062,9 +1062,7 @@ func (r *Ring) getCachedShuffledSubring(identifier string, size int, lookbackPer
 	// so zones and tokens are equal.
 	for name, cachedIng := range subring.ringDesc.Ingesters {
 		ing := r.ringDesc.Ingesters[name]
-		if cachedIng.State != ing.State {
-			subring.invalidateZonalOwnership()
-		}
+		subring.invalidateZonalOwnershipOnStateChange(cachedIng.State, ing.State)
 		cachedIng.State = ing.State
 		cachedIng.Timestamp = ing.Timestamp
 		subring.ringDesc.Ingesters[name] = cachedIng
