@@ -918,12 +918,13 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 	)
 
 	if cfg.UseRingOwnershipForLimits {
-		ownershipRing, err := ring.NewDescFedRing(cfg.LifecyclerConfig.RingConfig, "ingester-ownership", RingKey, i.lifecycler.KVStore, logger)
+		ownershipRing, err := newOwnershipRing(cfg.LifecyclerConfig.RingConfig, i.lifecycler.KVStore, logger)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create the ring for ownership-based limits")
 		}
+		ownershipDelegate.instanceID = i.lifecycler.ID
 		ownershipDelegate.ring.Store(ownershipRing)
-		i.ownershipRefresher = newOwnershipRefresher(ownershipRing, i.lifecycler.ID, cfg.DistributorExtendWrites, i.limiter.shuffleShardingEnabled, limits, registerer)
+		i.ownershipRefresher = newOwnershipRefresher(ownershipRing, i.lifecycler.ID, cfg.DistributorExtendWrites, i.limiter.shuffleShardingEnabled, limits, registerer, ownershipDelegate.generation.Load)
 		i.limiter.ownership = i.ownershipRefresher.ownership
 	}
 
