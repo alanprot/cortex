@@ -146,6 +146,53 @@ func TestOwnershipRefresher(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestOwnershipRefresher_RecomputesOnlyWhenTheShareCanChange(t *testing.T) {
+	const (
+		tenant    = "tenant"
+		shardSize = 6
+	)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 4, tokensPerInstance: 16}
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	r := newOwnershipTestRing(t, layout.zones, nil)
+	r.UpdateDesc(desc)
+
+	limits := &staticTenantLimits{limits: map[string]*validation.Limits{tenant: {IngestionTenantShardSize: shardSize}}}
+	ingesterID := ownershipTestInstanceID(0, 0)
+	refresher := newOwnershipRefresher(r, ingesterID, true, true, validation.NewOverrides(validation.Limits{}, limits), nil)
+	refresher.refresh([]string{tenant})
+	first := refresher.tenants[tenant]
+
+	setState := func(id string, state ring.InstanceState) {
+		instance := desc.Ingesters[id]
+		instance.State = state
+		desc.Ingesters[id] = instance
+		r.UpdateDesc(desc)
+		refresher.refresh([]string{tenant})
+	}
+
+	// A state change in another zone cannot move this ingester's share.
+	setState(ownershipTestInstanceID(1, 0), ring.LEAVING)
+	assert.Equal(t, first, refresher.tenants[tenant])
+
+	// One in its own zone can, so the share is recomputed and matches the
+	// tenant's subring.
+	setState(ownershipTestInstanceID(0, 1), ring.LEAVING)
+	assert.NotEqual(t, first.gen, refresher.tenants[tenant].gen)
+	want := r.ShuffleShard(tenant, shardSize).(*ring.Ring).ZonalOwnership(ring.Write)[ingesterID]
+	assert.Equal(t, want, refresher.tenants[tenant].share)
+
+	// A new shard size recomputes too.
+	limits.limits[tenant] = &validation.Limits{IngestionTenantShardSize: shardSize + 3}
+	refresher.refresh([]string{tenant})
+	assert.Equal(t, shardSize+3, refresher.tenants[tenant].shardSize)
+	want = r.ShuffleShard(tenant, shardSize+3).(*ring.Ring).ZonalOwnership(ring.Write)[ingesterID]
+	assert.Equal(t, want, refresher.tenants[tenant].share)
+
+	// A tenant gone from the ingester is dropped.
+	refresher.refresh(nil)
+	assert.Empty(t, refresher.tenants)
+}
+
 func TestOwnershipRefresher_ZoneMissingFromRing(t *testing.T) {
 	const tenant = "tenant"
 	// RF 3 over a ring with only 2 zones: Get puts a second copy in one zone,

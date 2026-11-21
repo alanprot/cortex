@@ -59,6 +59,18 @@ type ownershipRefresher struct {
 	limits                 *validation.Overrides
 	ownership              *tenantOwnership
 	shareGauge             *prometheus.GaugeVec
+
+	// The last share computed per tenant, reused until the ring or the
+	// tenant's shard size changes in a way that can move it. Only touched by
+	// refresh.
+	tenants map[string]tenantShare
+}
+
+type tenantShare struct {
+	shardSize int
+	gen       ring.ShardOwnershipGeneration
+	share     float64
+	zones     int
 }
 
 func newOwnershipRefresher(r *ring.Ring, instanceID string, extendWrites, shuffleShardingEnabled bool, limits *validation.Overrides, registerer prometheus.Registerer) *ownershipRefresher {
@@ -87,22 +99,31 @@ func (o *ownershipRefresher) refresh(userIDs []string) {
 		// No heartbeat has fed the ring yet.
 		return
 	}
+	gen := o.ring.ShardOwnershipGeneration(o.instanceID, o.writeOp)
+	tenants := make(map[string]tenantShare, len(userIDs))
 	shares := make(map[string]float64, len(userIDs))
 	for _, userID := range userIDs {
-		var sub ring.ReadRing = o.ring
-		if size := o.limits.IngestionTenantShardSize(userID); o.shuffleShardingEnabled && size > 0 {
-			// Same subring the distributor routes the tenant's writes with.
-			sub = o.ring.ShuffleShard(userID, size)
+		size := 0
+		if o.shuffleShardingEnabled {
+			size = o.limits.IngestionTenantShardSize(userID)
 		}
-		zonal, ok := sub.(ring.ZonalOwnershipRing)
+		t, ok := o.tenants[userID]
+		if !ok || t.shardSize != size || t.gen != gen {
+			// Same shard the distributor routes the tenant's writes with.
+			t.share, t.zones, t.gen = o.ring.InstanceShardZonalOwnership(userID, size, o.instanceID, o.writeOp)
+			t.shardSize = size
+		}
+		tenants[userID] = t
+
 		// Shares describe one copy per zone. When a zone is missing from the
 		// ring, Get puts a second copy in another zone, so leave the tenant out
 		// and let the limiter use the even split, which accounts for it.
-		if !ok || zonal.ZonesCount() != o.ring.ReplicationFactor() {
+		if t.zones != o.ring.ReplicationFactor() {
 			continue
 		}
-		shares[userID] = zonal.ZonalOwnership(o.writeOp)[o.instanceID]
+		shares[userID] = t.share
 	}
+	o.tenants = tenants
 	o.ownership.shares.Store(&shares)
 
 	o.shareGauge.Reset()
