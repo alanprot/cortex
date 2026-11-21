@@ -290,6 +290,22 @@ func TestRing_ZonalOwnership_InvalidatedOnStateChange(t *testing.T) {
 	assert.InDelta(t, 0.75, got["a3"], ownershipTolerance)
 }
 
+func TestRing_ZonalOwnership_KeptOnHeartbeat(t *testing.T) {
+	r := newOwnershipTestRing(t, 2, newOwnershipTestDesc(handPickedInstances(nil)))
+	first := r.ZonalOwnership(Write)
+
+	// Same tokens and states, newer heartbeats: only timestamps change.
+	desc := newOwnershipTestDesc(handPickedInstances(nil))
+	for id, instance := range desc.Ingesters {
+		instance.Timestamp++
+		desc.Ingesters[id] = instance
+	}
+	r.updateRingState(desc)
+
+	assert.Equal(t, reflect.ValueOf(first).Pointer(), reflect.ValueOf(r.ZonalOwnership(Write)).Pointer(),
+		"a heartbeat must not invalidate the cached ownership")
+}
+
 func TestRing_ZonalOwnership_InvalidatedOnTokenChange(t *testing.T) {
 	r := newOwnershipTestRing(t, 2, newOwnershipTestDesc(handPickedInstances(nil)))
 	require.InDelta(t, 0.25, r.ZonalOwnership(Write)["a1"], ownershipTolerance)
@@ -349,4 +365,107 @@ func TestRing_ZonalOwnership_CachedSubringInvalidatedOnStateChange(t *testing.T)
 	cachedSubring := r.ShuffleShard(tenant, shardSize)
 	require.Same(t, subring, cachedSubring, "expected the cached subring")
 	assert.Zero(t, cachedSubring.(ZonalOwnershipRing).ZonalOwnership(Write)[target])
+}
+
+// cachedOwnershipPointer returns the identity of the map cached for op, so a
+// test can tell whether a call reused the cache or recomputed it.
+func cachedOwnershipPointer(r *Ring, op Operation) uintptr {
+	return reflect.ValueOf(r.ZonalOwnership(op)).Pointer()
+}
+
+func TestRing_ZonalOwnership_InvalidatedOnlyWhenOwnershipCanChange(t *testing.T) {
+	tests := map[string]struct {
+		from, to                     InstanceState
+		writeKept, writeNoExtendKept bool
+	}{
+		// Write extends past every state but ACTIVE, WriteNoExtend only past READONLY.
+		"ACTIVE to LEAVING":   {from: ACTIVE, to: LEAVING, writeKept: false, writeNoExtendKept: true},
+		"ACTIVE to READONLY":  {from: ACTIVE, to: READONLY, writeKept: false, writeNoExtendKept: false},
+		"JOINING to ACTIVE":   {from: JOINING, to: ACTIVE, writeKept: false, writeNoExtendKept: true},
+		"PENDING to JOINING":  {from: PENDING, to: JOINING, writeKept: true, writeNoExtendKept: true},
+		"LEAVING to READONLY": {from: LEAVING, to: READONLY, writeKept: true, writeNoExtendKept: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			r := newOwnershipTestRing(t, 2, newOwnershipTestDesc(handPickedInstances(map[string]func(*ownershipTestInstance){"a2": withState(tc.from)})))
+			write, writeNoExtend := cachedOwnershipPointer(r, Write), cachedOwnershipPointer(r, WriteNoExtend)
+
+			r.updateRingState(newOwnershipTestDesc(handPickedInstances(map[string]func(*ownershipTestInstance){"a2": withState(tc.to)})))
+
+			assert.Equal(t, tc.writeKept, cachedOwnershipPointer(r, Write) == write, "Write cache kept")
+			assert.Equal(t, tc.writeNoExtendKept, cachedOwnershipPointer(r, WriteNoExtend) == writeNoExtend, "WriteNoExtend cache kept")
+		})
+	}
+}
+
+func TestRing_ZonalOwnership_InvalidatedWhenAnInstanceLeavesTheRing(t *testing.T) {
+	r := newOwnershipTestRing(t, 2, newOwnershipTestDesc(handPickedInstances(nil)))
+	require.InDelta(t, 0.25, r.ZonalOwnership(Write)["a2"], ownershipTolerance)
+
+	desc := newOwnershipTestDesc(handPickedInstances(nil))
+	desc.RemoveIngester("a2")
+	r.updateRingState(desc)
+
+	got := r.ZonalOwnership(Write)
+	assert.NotContains(t, got, "a2")
+	assert.InDelta(t, 0.75, got["a3"], ownershipTolerance)
+}
+
+// Whatever sequence of heartbeats and state changes a ring goes through, the
+// cached ownership must equal a fresh computation, for the whole ring and for
+// cached shuffle-shard subrings.
+func TestRing_ZonalOwnership_CacheMatchesFreshComputation(t *testing.T) {
+	const (
+		zones     = 3
+		perZone   = 6
+		tokens    = 16
+		steps     = 300
+		shardSize = 9
+		tenant    = "tenant"
+	)
+	states := []InstanceState{ACTIVE, ACTIVE, ACTIVE, JOINING, LEAVING, PENDING, READONLY}
+	ops := map[string]Operation{"Write": Write, "WriteNoExtend": WriteNoExtend}
+	rnd := rand.New(rand.NewSource(ownershipTestSeed))
+
+	desc := newOwnershipTestDesc(randomOwnershipInstances(rnd, zones, perZone, tokens, nil))
+	r := newOwnershipTestRing(t, zones, desc)
+	ids := make([]string, 0, len(desc.Ingesters))
+	for id := range desc.Ingesters {
+		ids = append(ids, id)
+	}
+
+	fresh := func(d *Desc) *Ring {
+		f, err := NewDescFedRing(Config{HeartbeatTimeout: ownershipTestTimeout, ReplicationFactor: zones, ZoneAwarenessEnabled: true},
+			testRingName, testRingKey, &MockClient{}, log.NewNopLogger())
+		require.NoError(t, err)
+		f.UpdateDesc(d)
+		return f
+	}
+
+	for step := range steps {
+		// Every step is a heartbeat; some also change one instance's state.
+		next := newOwnershipTestDesc(nil)
+		for id, instance := range desc.Ingesters {
+			instance.Timestamp++
+			next.Ingesters[id] = instance
+		}
+		if rnd.Intn(2) == 0 {
+			id := ids[rnd.Intn(len(ids))]
+			instance := next.Ingesters[id]
+			instance.State = states[rnd.Intn(len(states))]
+			next.Ingesters[id] = instance
+		}
+		desc = next
+		r.UpdateDesc(desc)
+
+		want := fresh(desc)
+		for name, op := range ops {
+			require.Equal(t, want.ZonalOwnership(op), r.ZonalOwnership(op), "step %d, whole ring, %s", step, name)
+			require.Equal(t,
+				want.ShuffleShard(tenant, shardSize).(*Ring).ZonalOwnership(op),
+				r.ShuffleShard(tenant, shardSize).(*Ring).ZonalOwnership(op),
+				"step %d, subring, %s", step, name)
+		}
+	}
 }
