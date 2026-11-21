@@ -212,6 +212,16 @@ type Ring struct {
 	// invalidated by a change of tokens or instance states. Guarded by mtx.
 	zonalOwnershipByOp map[Operation]map[string]float64
 
+	// Versions of the ring as far as shard picks and ownership are concerned,
+	// see ShardOwnershipGeneration. Guarded by mtx.
+	ownershipTopologyGeneration uint64
+	ownershipZoneGenerations    map[string]uint64
+	ownershipOps                map[Operation]struct{}
+
+	// Whether a token listed under one zone maps to an instance of another,
+	// which happens when two zones share a token. Guarded by mtx.
+	crossZoneTokens bool
+
 	memberOwnershipGaugeVec      *prometheus.GaugeVec
 	memberZonalOwnershipGaugeVec *prometheus.GaugeVec
 	numMembersGaugeVec           *prometheus.GaugeVec
@@ -378,7 +388,9 @@ func (r *Ring) updateRingState(ringDesc *Desc) {
 		r.mtx.Lock()
 		r.ringDesc = ringDesc
 		for id, instance := range ringDesc.Ingesters {
-			r.invalidateZonalOwnershipOnStateChange(prevRing.Ingesters[id].State, instance.State)
+			prev := prevRing.Ingesters[id].State
+			r.invalidateZonalOwnershipOnStateChange(prev, instance.State)
+			r.bumpOwnershipZoneGeneration(instance.Zone, prev, instance.State)
 		}
 		if rc == EqualButReadOnly && r.shuffledSubringCache != nil {
 			// Invalidate all cached subrings.
@@ -400,9 +412,11 @@ func (r *Ring) updateRingState(ringDesc *Desc) {
 	defer r.mtx.Unlock()
 	r.ringDesc = ringDesc
 	r.invalidateZonalOwnership()
+	r.ownershipTopologyGeneration++
 	r.ringTokens = ringTokens
 	r.ringTokensByZone = ringTokensByZone
 	r.ringInstanceByToken = ringInstanceByToken
+	r.crossZoneTokens = hasCrossZoneTokens(ringTokensByZone, ringInstanceByToken)
 	r.ringInstanceIdByAddr = ringInstanceByAddr
 	r.previousRingZones = r.ringZones
 	r.ringZones = ringZones
