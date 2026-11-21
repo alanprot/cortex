@@ -858,6 +858,61 @@ func (r *Ring) shuffleShardWithCache(identifier string, size int, lookbackPeriod
 	return result
 }
 
+// pickShardInstancesInZone adds to shard the count instances of zone that
+// shuffle sharding picks for identifier, walking tokens, the zone's sorted
+// tokens. An instance for which extend returns true is added without counting
+// towards count. The caller must hold r.mtx.
+func (r *Ring) pickShardInstancesInZone(identifier, zone string, tokens []uint32, count int, shard map[string]InstanceDesc, extend func(InstanceDesc) bool) {
+	// Initialise the random generator used to select instances in the ring.
+	// Since we consider each zone like an independent ring, we have to use dedicated
+	// pseudo-random generator for each zone, in order to guarantee the "consistency"
+	// property when the shard size changes or a new zone is added.
+	random := rand.New(rand.NewSource(shardUtil.ShuffleShardSeed(identifier, zone)))
+
+	// To select one more instance while guaranteeing the "consistency" property,
+	// we do pick a random value from the generator and resolve uniqueness collisions
+	// (if any) continuing walking the ring.
+	for range count {
+		start := searchToken(tokens, random.Uint32())
+		iterations := 0
+		found := false
+
+		for p := start; iterations < len(tokens); p++ {
+			iterations++
+
+			// Wrap p around in the ring.
+			p %= len(tokens)
+
+			info, ok := r.ringInstanceByToken[tokens[p]]
+			if !ok {
+				// This should never happen unless a bug in the ring code.
+				panic(ErrInconsistentTokensInfo)
+			}
+
+			// Ensure we select an unique instance.
+			if _, ok := shard[info.InstanceID]; ok {
+				continue
+			}
+
+			instance := r.ringDesc.Ingesters[info.InstanceID]
+			shard[info.InstanceID] = instance
+			if extend(instance) {
+				continue
+			}
+
+			found = true
+			break
+		}
+
+		// If one more instance has not been found, we can stop looking for
+		// more instances in this zone, because it means the zone has no more
+		// instances which haven't been already selected.
+		if !found {
+			break
+		}
+	}
+}
+
 func (r *Ring) shuffleShard(identifier string, size int, lookbackPeriod time.Duration, now time.Time, zoneStableSharding bool) (*Ring, time.Time) {
 	lookbackUntil := now.Add(-lookbackPeriod).Unix()
 	lookbackInSeconds := int64(lookbackPeriod / time.Second)
@@ -902,73 +957,27 @@ func (r *Ring) shuffleShard(identifier string, size int, lookbackPeriod time.Dur
 			tokens = r.ringTokens
 		}
 
-		// Initialise the random generator used to select instances in the ring.
-		// Since we consider each zone like an independent ring, we have to use dedicated
-		// pseudo-random generator for each zone, in order to guarantee the "consistency"
-		// property when the shard size changes or a new zone is added.
-		random := rand.New(rand.NewSource(shardUtil.ShuffleShardSeed(identifier, zone)))
-
-		// To select one more instance while guaranteeing the "consistency" property,
-		// we do pick a random value from the generator and resolve uniqueness collisions
-		// (if any) continuing walking the ring.
 		finalInstancesPerZone := numInstancesPerZone
 		if zonesWithExtraInstance > 0 {
 			zonesWithExtraInstance--
 			finalInstancesPerZone++
 		}
-		for i := 0; i < finalInstancesPerZone; i++ {
-			start := searchToken(tokens, random.Uint32())
-			iterations := 0
-			found := false
 
-			for p := start; iterations < len(tokens); p++ {
-				iterations++
-
-				// Wrap p around in the ring.
-				p %= len(tokens)
-
-				info, ok := r.ringInstanceByToken[tokens[p]]
-				if !ok {
-					// This should never happen unless a bug in the ring code.
-					panic(ErrInconsistentTokensInfo)
+		r.pickShardInstancesInZone(identifier, zone, tokens, finalInstancesPerZone, shard, func(instance InstanceDesc) bool {
+			// If the lookback is enabled and this instance has been registered within the lookback period
+			// then we should include it in the subring but continuing selecting instances.
+			// If an instance is in READONLY we should always extend. The write path will filter it out when GetRing.
+			// The read path should extend to get new ingester used on write
+			withinLookback := lookbackPeriod > 0 && instance.RegisteredTimestamp >= lookbackUntil
+			if withinLookback {
+				// Track when this instance will leave the lookback window; that's the earliest
+				// point at which the cached subring's membership would change.
+				if expiry := instance.RegisteredTimestamp + lookbackInSeconds; minLookbackExpiry == 0 || expiry < minLookbackExpiry {
+					minLookbackExpiry = expiry
 				}
-
-				// Ensure we select an unique instance.
-				if _, ok := shard[info.InstanceID]; ok {
-					continue
-				}
-
-				instanceID := info.InstanceID
-				instance := r.ringDesc.Ingesters[instanceID]
-				shard[instanceID] = instance
-
-				// If the lookback is enabled and this instance has been registered within the lookback period
-				// then we should include it in the subring but continuing selecting instances.
-				// If an instance is in READONLY we should always extend. The write path will filter it out when GetRing.
-				// The read path should extend to get new ingester used on write
-				withinLookback := lookbackPeriod > 0 && instance.RegisteredTimestamp >= lookbackUntil
-				if withinLookback {
-					// Track when this instance will leave the lookback window; that's the earliest
-					// point at which the cached subring's membership would change.
-					if expiry := instance.RegisteredTimestamp + lookbackInSeconds; minLookbackExpiry == 0 || expiry < minLookbackExpiry {
-						minLookbackExpiry = expiry
-					}
-				}
-				if withinLookback || instance.State == READONLY {
-					continue
-				}
-
-				found = true
-				break
 			}
-
-			// If one more instance has not been found, we can stop looking for
-			// more instances in this zone, because it means the zone has no more
-			// instances which haven't been already selected.
-			if !found {
-				break
-			}
-		}
+			return withinLookback || instance.State == READONLY
+		})
 	}
 
 	// Build a read-only ring for the shard.
