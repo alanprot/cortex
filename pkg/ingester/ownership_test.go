@@ -576,3 +576,40 @@ func withoutGeneration(tenants map[string]tenantShare) map[string]tenantShare {
 	}
 	return out
 }
+
+// Heartbeat callbacks can overlap: the Lifecycler's first heartbeat runs on its
+// own goroutine. If the ring were updated outside the delegate's lock, one
+// callback could update the ring after another, then compare first and find no
+// change, leaving the ring and the recorded desc different for good. So a
+// callback must not touch the ring while another holds the lock.
+func TestRingOwnershipDelegate_UpdatesTheRingUnderTheLock(t *testing.T) {
+	const wait = 50 * time.Millisecond
+	me := ownershipTestInstanceID(0, 0)
+	neighbour := ownershipTestInstanceID(0, 1)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 3, tokensPerInstance: 4}
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	d, r := newOwnershipTestDelegate(t, me, layout.zones)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+
+	readOnly := cloneOwnershipTestDesc(desc)
+	setOwnershipTestState(neighbour, ring.READONLY)(readOnly)
+	neighbourIsReadOnly := func() bool {
+		state, err := r.GetInstanceState(neighbour)
+		require.NoError(t, err)
+		return state == ring.READONLY
+	}
+
+	d.mtx.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.OnRingInstanceHeartbeat(nil, readOnly)
+	}()
+	time.Sleep(wait)
+	assert.False(t, neighbourIsReadOnly(), "the ring was updated while another callback held the lock")
+	d.mtx.Unlock()
+
+	<-done
+	assert.True(t, neighbourIsReadOnly())
+	assert.True(t, d.zoneMembers[neighbour].readOnly)
+}

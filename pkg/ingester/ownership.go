@@ -52,12 +52,12 @@ func (d *ringOwnershipDelegate) OnRingInstanceHeartbeat(_ *ring.Lifecycler, ring
 	if r == nil {
 		return
 	}
+	// Callbacks can overlap, so the ring and the record are updated together.
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
 	// Update the ring before bumping the generation, so a refresh that reads
 	// the new generation computes from the new ring.
 	r.UpdateDesc(ringDesc)
-
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
 	if d.sharesMayChange(ringDesc) {
 		d.record(ringDesc)
 		d.generation.Inc()
