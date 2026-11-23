@@ -33,10 +33,13 @@ type ringOwnershipDelegate struct {
 	// Bumped after each ring update that can change this ingester's shares.
 	generation atomic.Uint64
 
-	mtx   sync.Mutex
-	seen  bool
-	zones int
-	// The instances of this ingester's zone, as of the last bump.
+	mtx        sync.Mutex
+	seen       bool
+	zones      int
+	duplicates bool
+	// The instances compared on each heartbeat, as of the last bump: those of
+	// this ingester's zone, or of every zone while the ring has duplicate
+	// tokens.
 	zoneMembers map[string]zoneMember
 }
 
@@ -58,8 +61,9 @@ func (d *ringOwnershipDelegate) OnRingInstanceHeartbeat(_ *ring.Lifecycler, ring
 	// Update the ring before bumping the generation, so a refresh that reads
 	// the new generation computes from the new ring.
 	r.UpdateDesc(ringDesc)
-	if d.sharesMayChange(ringDesc) {
-		d.record(ringDesc)
+	duplicates := r.HasDuplicateTokens()
+	if d.sharesMayChange(ringDesc, duplicates) {
+		d.record(ringDesc, duplicates)
 		d.generation.Inc()
 	}
 }
@@ -68,14 +72,16 @@ func (d *ringOwnershipDelegate) OnRingInstanceHeartbeat(_ *ring.Lifecycler, ring
 // left this ingester's zone, changed its tokens, or became or stopped being
 // READONLY, or the number of zones changed. Shard picks and ownership are per
 // zone, so changes in other zones do not move this ingester's shares; the
-// number of zones does, through the number of shard members per zone.
-func (d *ringOwnershipDelegate) sharesMayChange(desc *ring.Desc) bool {
-	if !d.seen || countZones(desc) != d.zones {
+// number of zones does, through the number of shard members per zone. While two
+// instances share a token, an instance of another zone can decide this zone's
+// picks and ranges, so every zone is compared.
+func (d *ringOwnershipDelegate) sharesMayChange(desc *ring.Desc, duplicates bool) bool {
+	if !d.seen || countZones(desc) != d.zones || duplicates != d.duplicates {
 		return true
 	}
 	zone, members := desc.Ingesters[d.instanceID].Zone, 0
 	for id, instance := range desc.Ingesters {
-		if instance.Zone != zone {
+		if instance.Zone != zone && !duplicates {
 			continue
 		}
 		members++
@@ -87,13 +93,14 @@ func (d *ringOwnershipDelegate) sharesMayChange(desc *ring.Desc) bool {
 	return members != len(d.zoneMembers)
 }
 
-func (d *ringOwnershipDelegate) record(desc *ring.Desc) {
+func (d *ringOwnershipDelegate) record(desc *ring.Desc, duplicates bool) {
 	zone := desc.Ingesters[d.instanceID].Zone
 	d.seen = true
 	d.zones = countZones(desc)
+	d.duplicates = duplicates
 	d.zoneMembers = map[string]zoneMember{}
 	for id, instance := range desc.Ingesters {
-		if instance.Zone == zone {
+		if instance.Zone == zone || duplicates {
 			d.zoneMembers[id] = zoneMember{tokens: slices.Clone(instance.Tokens), readOnly: instance.State == ring.READONLY}
 		}
 	}

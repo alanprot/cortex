@@ -361,3 +361,37 @@ func TestRing_ZonalOwnership_Subrings(t *testing.T) {
 	require.NotSame(t, subring, rebuilt)
 	assert.Zero(t, rebuilt.(ZonalOwnershipRing).ZonalOwnership()[target])
 }
+
+func TestRing_HasDuplicateTokens(t *testing.T) {
+	tests := map[string]struct {
+		instances []ownershipTestInstance
+		expected  bool
+	}{
+		"no shared token": {
+			instances: []ownershipTestInstance{
+				{id: "a1", zone: "a", tokens: []uint32{1, 2}, state: ACTIVE},
+				{id: "b1", zone: "b", tokens: []uint32{3}, state: ACTIVE},
+			},
+		},
+		"a token shared across zones": {
+			instances: []ownershipTestInstance{
+				{id: "a1", zone: "a", tokens: []uint32{1, 2}, state: ACTIVE},
+				{id: "b1", zone: "b", tokens: []uint32{2}, state: ACTIVE},
+			},
+			expected: true,
+		},
+		"a token shared within a zone": {
+			instances: []ownershipTestInstance{
+				{id: "a1", zone: "a", tokens: []uint32{1}, state: ACTIVE},
+				{id: "a2", zone: "a", tokens: []uint32{1}, state: ACTIVE},
+			},
+			expected: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			r := newOwnershipTestRing(t, 1, newOwnershipTestDesc(tc.instances))
+			assert.Equal(t, tc.expected, r.HasDuplicateTokens())
+		})
+	}
+}

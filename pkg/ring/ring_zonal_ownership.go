@@ -24,6 +24,16 @@ func (r *Ring) ZonesCount() int {
 	return len(r.ringZones)
 }
 
+// HasDuplicateTokens reports whether two instances of the ring hold the same
+// token. A token maps to one instance ring-wide, so when the two are in
+// different zones, one zone's ownership and shuffle-shard picks depend on an
+// instance of another zone.
+func (r *Ring) HasDuplicateTokens() bool {
+	r.mtx.RLock()
+	defer r.mtx.RUnlock()
+	return len(r.ringTokens) != len(r.ringInstanceByToken)
+}
+
 // ZonalOwnership returns, for every instance in the ring, the fraction of its
 // zone's hash space it owns.
 //

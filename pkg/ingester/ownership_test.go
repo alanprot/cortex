@@ -613,3 +613,125 @@ func TestRingOwnershipDelegate_UpdatesTheRingUnderTheLock(t *testing.T) {
 	assert.True(t, neighbourIsReadOnly())
 	assert.True(t, d.zoneMembers[neighbour].readOnly)
 }
+
+// freshOwnershipShares computes the shares from scratch on a new ring, so a bug
+// in the reuse or in the ring's caches cannot show on both sides.
+func freshOwnershipShares(t *testing.T, desc *ring.Desc, me string, overrides *validation.Overrides, tenants []string) map[string]tenantShare {
+	t.Helper()
+	_, r := newOwnershipTestDelegate(t, me, 3)
+	r.UpdateDesc(desc)
+	fresh := newOwnershipRefresher(r, me, true, overrides, nil, nil)
+	fresh.refresh(tenants)
+	return withoutGeneration(fresh.tenants)
+}
+
+// collidingOwnershipTestDesc returns a ring where an instance of zone-1 holds
+// a token of a zone-0 neighbour of me, the one just before a token of me. The
+// zone-1 instance's ID sorts after every zone-0 ID, so it wins the ring-wide
+// token map, and its state decides who owns me's preceding range.
+func collidingOwnershipTestDesc(t *testing.T, layout ownershipTestRingLayout, me, collider string) *ring.Desc {
+	t.Helper()
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	owner := map[uint32]string{}
+	var tokens []uint32
+	for id, instance := range desc.Ingesters {
+		if instance.Zone == "zone-0" {
+			for _, token := range instance.Tokens {
+				owner[token] = id
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	slices.Sort(tokens)
+	for i, token := range tokens {
+		if owner[token] != me && owner[tokens[(i+1)%len(tokens)]] == me {
+			instance := desc.Ingesters[collider]
+			instance.Tokens = append(slices.Clone(instance.Tokens[1:]), token)
+			slices.Sort(instance.Tokens)
+			desc.Ingesters[collider] = instance
+			return desc
+		}
+	}
+	t.Fatal("no token found")
+	return nil
+}
+
+func TestOwnershipRefresher_TokenSharedAcrossZones(t *testing.T) {
+	const tenant = "tenant"
+	me := ownershipTestInstanceID(0, 0)
+	collider := ownershipTestInstanceID(1, 0)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 4, tokensPerInstance: 16}
+	overrides := validation.NewOverrides(validation.Limits{}, nil)
+	tenants := []string{tenant}
+
+	tests := map[string]struct {
+		// Starts from a ring without the shared token when false.
+		sharedFromStart bool
+		prepare         func(*ring.Desc)
+		change          func(*ring.Desc)
+	}{
+		"the instance holding it in another zone becomes READONLY": {
+			sharedFromStart: true,
+			change:          setOwnershipTestState(collider, ring.READONLY),
+		},
+		"an instance joins another zone with it": {
+			change: func(d *ring.Desc) {
+				shared := collidingOwnershipTestDesc(t, layout, me, collider).Ingesters[collider].Tokens
+				d.AddIngester("zone-1-joined", "zone-1-joined-addr", "zone-1", shared, ring.READONLY, time.Time{})
+			},
+		},
+		"the READONLY instance holding it in another zone leaves": {
+			sharedFromStart: true,
+			prepare:         setOwnershipTestState(collider, ring.READONLY),
+			change:          func(d *ring.Desc) { d.RemoveIngester(collider) },
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+			if tc.sharedFromStart {
+				desc = collidingOwnershipTestDesc(t, layout, me, collider)
+			}
+			if tc.prepare != nil {
+				tc.prepare(desc)
+			}
+			d, r := newOwnershipTestDelegate(t, me, layout.zones)
+			d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+			refresher := newOwnershipRefresher(r, me, true, overrides, nil, d.generation.Load)
+			refresher.refresh(tenants)
+			before := refresher.tenants[tenant].share
+
+			next := cloneOwnershipTestDesc(desc)
+			tc.change(next)
+			d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(next))
+			refresher.refresh(tenants)
+
+			fresh := freshOwnershipShares(t, next, me, overrides, tenants)
+			require.NotEqual(t, before, fresh[tenant].share, "the layout must make the change move the share")
+			assert.Equal(t, fresh, withoutGeneration(refresher.tenants))
+		})
+	}
+}
+
+// Without a shared token, changes in other zones keep the shares, as before.
+func TestRingOwnershipDelegate_ComparesOtherZonesOnlyWhileTokensAreShared(t *testing.T) {
+	me := ownershipTestInstanceID(0, 0)
+	collider := ownershipTestInstanceID(1, 0)
+	other := ownershipTestInstanceID(2, 1)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 4, tokensPerInstance: 16}
+
+	d, _ := newOwnershipTestDelegate(t, me, layout.zones)
+	desc := collidingOwnershipTestDesc(t, layout, me, collider)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	bump := func(change func(*ring.Desc)) bool {
+		before := d.generation.Load()
+		change(desc)
+		d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+		return d.generation.Load() != before
+	}
+
+	assert.True(t, bump(setOwnershipTestState(other, ring.READONLY)), "shared token: a change in another zone counts")
+	assert.True(t, bump(func(d *ring.Desc) { d.RemoveIngester(collider) }), "the shared token goes away")
+	assert.False(t, bump(setOwnershipTestState(other, ring.ACTIVE)), "no shared token: a change in another zone does not count")
+}
