@@ -395,3 +395,17 @@ func TestRing_HasDuplicateTokens(t *testing.T) {
 		})
 	}
 }
+
+// Callers tell whether ShuffleShard used the whole ring by comparing the result
+// with the ring itself, so it must return the receiver, not a copy.
+func TestRing_ShuffleShardReturnsTheRingItselfWhenItCoversTheRing(t *testing.T) {
+	r := newOwnershipTestRing(t, 2, newOwnershipTestDesc(handPickedInstances(nil)))
+	instances := r.InstancesCount()
+
+	for _, size := range []int{-1, 0, instances, instances + 1} {
+		assert.Same(t, r, r.ShuffleShard("tenant", size), "shard size %d", size)
+		assert.True(t, ShuffleShardUsesWholeRing(size, instances), "shard size %d", size)
+	}
+	assert.NotSame(t, r, r.ShuffleShard("tenant", instances-1))
+	assert.False(t, ShuffleShardUsesWholeRing(instances-1, instances))
+}

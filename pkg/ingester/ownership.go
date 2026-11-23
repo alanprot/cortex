@@ -207,7 +207,6 @@ func (o *ownershipRefresher) refresh(userIDs []string) {
 		if o.generation == nil || !ok || t.generation != generation || t.shardSize != size || t.wholeRing != wholeRing {
 			t = o.computeShare(userID, size)
 			t.generation = generation
-			t.wholeRing = wholeRing
 		}
 		tenants[userID] = t
 
@@ -234,13 +233,14 @@ func (o *ownershipRefresher) computeShare(userID string, shardSize int) tenantSh
 		// Same subring the distributor routes the tenant's writes with.
 		sub = o.ring.ShuffleShard(userID, shardSize)
 	}
+	// Taken from the ring ShuffleShard returned: the instance count it read
+	// can differ from the one the caller compares against.
+	t := tenantShare{shardSize: shardSize, wholeRing: sub == ring.ReadRing(o.ring)}
 	zonal, ok := sub.(ring.ZonalOwnershipRing)
 	if !ok {
-		return tenantShare{shardSize: shardSize}
+		return t
 	}
-	return tenantShare{
-		shardSize: shardSize,
-		share:     zonal.ZonalOwnership()[o.instanceID],
-		zones:     zonal.ZonesCount(),
-	}
+	t.share = zonal.ZonalOwnership()[o.instanceID]
+	t.zones = zonal.ZonesCount()
+	return t
 }

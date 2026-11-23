@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -734,4 +735,111 @@ func TestRingOwnershipDelegate_ComparesOtherZonesOnlyWhileTokensAreShared(t *tes
 	assert.True(t, bump(setOwnershipTestState(other, ring.READONLY)), "shared token: a change in another zone counts")
 	assert.True(t, bump(func(d *ring.Desc) { d.RemoveIngester(collider) }), "the shared token goes away")
 	assert.False(t, bump(setOwnershipTestState(other, ring.ACTIVE)), "no shared token: a change in another zone does not count")
+}
+
+// hookedTenantLimits runs hook once, the first time ByUserID is called for
+// user, standing in for a heartbeat that updates the ring during a refresh.
+type hookedTenantLimits struct {
+	staticTenantLimits
+	user string
+	hook func()
+	once sync.Once
+}
+
+func (h *hookedTenantLimits) ByUserID(userID string) *validation.Limits {
+	if userID == h.user && h.hook != nil {
+		h.once.Do(h.hook)
+	}
+	return h.staticTenantLimits.ByUserID(userID)
+}
+
+// The refresher reads the instance count once per refresh, but ShuffleShard
+// reads it again. A heartbeat during a refresh can move the count across a
+// tenant's shard size between the two reads. The stored flag must describe the
+// ring the share was computed from, or once the count moves back, which does
+// not bump the generation, the wrong share is reused.
+func TestOwnershipRefresher_WholeRingFlagDescribesTheRingUsed(t *testing.T) {
+	const shardSize = 11
+	me := ownershipTestInstanceID(0, 0)
+	// Zone-0 has 6 instances, zones 1 and 2 have 3: 12 instances, so a shard
+	// of 11 picks 4 of zone-0's 6 and differs from the whole ring.
+	desc := ring.NewDesc()
+	rnd := rand.New(rand.NewSource(ownershipTestSeed))
+	for z, n := range []int{6, 3, 3} {
+		for i := range n {
+			tokens := make([]uint32, 16)
+			for k := range tokens {
+				tokens[k] = rnd.Uint32()
+			}
+			slices.Sort(tokens)
+			id := ownershipTestInstanceID(z, i)
+			desc.AddIngester(id, id+"-addr", fmt.Sprintf("zone-%d", z), tokens, ring.ACTIVE, time.Time{})
+		}
+	}
+	// A tenant whose subring includes this ingester.
+	tenant := ""
+	for i := range 100 {
+		candidate := fmt.Sprintf("tenant-%d", i)
+		o := validation.NewOverrides(validation.Limits{}, &staticTenantLimits{limits: map[string]*validation.Limits{candidate: {IngestionTenantShardSize: shardSize}}})
+		if freshOwnershipShares(t, desc, me, o, []string{candidate})[candidate].share > 0 {
+			tenant = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, tenant)
+	limits := &hookedTenantLimits{user: tenant}
+	limits.limits = map[string]*validation.Limits{tenant: {IngestionTenantShardSize: shardSize}}
+	overrides := validation.NewOverrides(validation.Limits{}, limits)
+
+	d, r := newOwnershipTestDelegate(t, me, 3)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher := newOwnershipRefresher(r, me, true, overrides, nil, d.generation.Load)
+	refresher.refresh(nil)
+
+	// During the refresh that first sees the tenant, an instance leaves zone-1,
+	// so ShuffleShard sees 11 instances and returns the whole ring.
+	shrunk := cloneOwnershipTestDesc(desc)
+	shrunk.RemoveIngester(ownershipTestInstanceID(1, 2))
+	limits.hook = func() { d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(shrunk)) }
+	refresher.refresh([]string{tenant})
+	require.True(t, refresher.tenants[tenant].wholeRing, "the share came from the whole ring")
+
+	// An instance joins zone-2: 12 instances again, without a bump.
+	grown := cloneOwnershipTestDesc(shrunk)
+	grown.AddIngester(ownershipTestInstanceID(2, 9), "zone-2-ingester-9-addr", "zone-2", []uint32{rnd.Uint32(), rnd.Uint32()}, ring.ACTIVE, time.Time{})
+	generation := d.generation.Load()
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(grown))
+	require.Equal(t, generation, d.generation.Load())
+	refresher.refresh([]string{tenant})
+
+	fresh := freshOwnershipShares(t, grown, me, overrides, []string{tenant})
+	require.NotEqual(t, fresh[tenant].share, freshOwnershipShares(t, shrunk, me, overrides, []string{tenant})[tenant].share, "the layout must make the two rings differ")
+	assert.Equal(t, fresh, withoutGeneration(refresher.tenants))
+}
+
+// A tenant using the whole ring must be stored as such. The refresher compares
+// the stored flag with ShuffleShardUsesWholeRing on every refresh, so if
+// ShuffleShard stopped returning the ring itself for such a tenant, the flags
+// would never match and the tenant would be recomputed on every refresh.
+func TestOwnershipRefresher_StoresWholeRingTenantsAsSuch(t *testing.T) {
+	me := ownershipTestInstanceID(0, 0)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 3, tokensPerInstance: 16}
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	instances := len(desc.Ingesters)
+	tenants := map[string]*validation.Limits{
+		"no-shard":         {IngestionTenantShardSize: 0},
+		"shard-equal-ring": {IngestionTenantShardSize: instances},
+		"shard-above-ring": {IngestionTenantShardSize: instances + 5},
+		"subring":          {IngestionTenantShardSize: instances - 3},
+	}
+	overrides := validation.NewOverrides(validation.Limits{}, &staticTenantLimits{limits: tenants})
+
+	d, r := newOwnershipTestDelegate(t, me, layout.zones)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher := newOwnershipRefresher(r, me, true, overrides, nil, d.generation.Load)
+	refresher.refresh(slices.Sorted(maps.Keys(tenants)))
+
+	for userID, limits := range tenants {
+		assert.Equal(t, ring.ShuffleShardUsesWholeRing(limits.IngestionTenantShardSize, instances), refresher.tenants[userID].wholeRing, userID)
+	}
 }
