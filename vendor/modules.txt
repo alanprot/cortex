@@ -140,6 +140,10 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapp
 # github.com/Masterminds/squirrel v1.5.4
 ## explicit; go 1.14
 github.com/Masterminds/squirrel
+# github.com/RoaringBitmap/roaring/v2 v2.30.0
+## explicit; go 1.24.0
+github.com/RoaringBitmap/roaring/v2
+github.com/RoaringBitmap/roaring/v2/internal
 # github.com/VictoriaMetrics/easyproto v1.1.3
 ## explicit; go 1.18
 github.com/VictoriaMetrics/easyproto
@@ -318,6 +322,9 @@ github.com/bboreham/go-loser
 # github.com/beorn7/perks v1.0.1
 ## explicit; go 1.11
 github.com/beorn7/perks/quantile
+# github.com/bits-and-blooms/bitset v1.24.4
+## explicit; go 1.16
+github.com/bits-and-blooms/bitset
 # github.com/blang/semver/v4 v4.0.0
 ## explicit; go 1.14
 github.com/blang/semver/v4
@@ -903,6 +910,9 @@ github.com/modern-go/reflect2
 # github.com/mozillazg/go-httpheader v0.4.0
 ## explicit; go 1.11
 github.com/mozillazg/go-httpheader
+# github.com/mschoch/smat v0.2.0
+## explicit; go 1.13
+github.com/mschoch/smat
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg
