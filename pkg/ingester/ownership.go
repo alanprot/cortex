@@ -146,6 +146,11 @@ type ownershipRefresher struct {
 	ownership              *tenantOwnership
 	shareGauge             *prometheus.GaugeVec
 	computations           prometheus.Counter
+	ownedSeriesGauge       *prometheus.GaugeVec
+
+	// Hands each tenant's owned ranges to its series tracker, with ok false
+	// when the share is unusable. Nil disables owned series tracking.
+	setOwnedRanges func(userID string, ranges []ring.TokenRange, ok bool) (owned int64, tracked bool)
 
 	// Only touched by refresh. ring is the last one built, and is never
 	// updated, so nothing changes while a refresh reads it. lastDesc is the
@@ -160,9 +165,10 @@ type tenantShare struct {
 	fingerprint uint64
 	// This ingester's hash if it is in the subring, else 0: the fingerprint
 	// does not tell which member is this ingester.
-	self  uint64
-	share float64
-	zones int
+	self   uint64
+	share  float64
+	zones  int
+	ranges []ring.TokenRange
 	// A token was held twice when this share was computed: recompute it after
 	// the next change.
 	duplicates bool
@@ -186,6 +192,10 @@ func newOwnershipRefresher(latest func() *ring.Desc, newRing func() (*ring.Ring,
 			Name: "cortex_ingester_ring_ownership_computations_total",
 			Help: "Number of times a ring ownership share was computed.",
 		}),
+		ownedSeriesGauge: promauto.With(registerer).NewGaugeVec(prometheus.GaugeOpts{
+			Name: "cortex_ingester_owned_series",
+			Help: "Number of the tenant's head series whose tokens are in the ranges this ingester owns, as of the last ownership refresh. Only reported when owned series tracking is enabled.",
+		}, []string{"user"}),
 	}
 }
 
@@ -253,6 +263,21 @@ func (o *ownershipRefresher) refresh(ctx context.Context, userIDs []string) {
 	o.lastDesc = desc
 	o.tenants = tenants
 	o.publish(tenants)
+	o.publishOwnedRanges(tenants)
+}
+
+// publishOwnedRanges updates the tenants' owned series trackers and reports them.
+func (o *ownershipRefresher) publishOwnedRanges(tenants map[string]tenantShare) {
+	if o.setOwnedRanges == nil {
+		return
+	}
+	o.ownedSeriesGauge.Reset()
+	for userID, t := range tenants {
+		ok := t.zones == o.ring.ReplicationFactor() && t.share > 0
+		if owned, tracked := o.setOwnedRanges(userID, t.ranges, ok); tracked {
+			o.ownedSeriesGauge.WithLabelValues(userID).Set(float64(owned))
+		}
+	}
 }
 
 // publish stores the shares for the limiter and reports them.
@@ -333,10 +358,14 @@ func (o *ownershipRefresher) computeShare(sub ring.ReadRing) tenantShare {
 	if !ok {
 		return tenantShare{}
 	}
-	return tenantShare{
+	t := tenantShare{
 		share: zonal.ZonalOwnership()[o.instanceID],
 		zones: zonal.ZonesCount(),
 	}
+	if o.setOwnedRanges != nil {
+		t.ranges = zonal.ZonalOwnedRanges(o.instanceID)
+	}
+	return t
 }
 
 // subringFingerprint hashes what zonal ownership reads of a subring's members:

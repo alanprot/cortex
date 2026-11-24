@@ -4261,6 +4261,14 @@ lifecycler:
 # CLI flag: -ingester.use-ring-ownership-for-limits
 [use_ring_ownership_for_limits: <boolean> | default = false]
 
+# Experimental: Check the per-user series limit against the head series whose
+# tokens are in the ranges this ingester owns, instead of every head series, so
+# series that moved to other ingesters stop counting before head compaction
+# removes them. Only effective with -ingester.use-ring-ownership-for-limits and
+# -distributor.shard-by-all-labels.
+# CLI flag: -ingester.owned-series-limit-enabled
+[owned_series_limit_enabled: <boolean> | default = false]
+
 instance_limits:
   # Max ingestion rate (samples/sec) that ingester will accept. This limit is
   # per-ingester, not per-tenant. Additional push requests will be rejected.
