@@ -30,8 +30,9 @@ const ownershipRefreshPeriod = 10 * time.Second
 type ringOwnershipDelegate struct {
 	ring atomic.Pointer[ring.Ring]
 
-	// Bumped after each ring update that can change a shuffle-shard pick or
-	// zonal ownership anywhere in the ring.
+	// Bumped before and after each ring update that can change a
+	// shuffle-shard pick or zonal ownership anywhere in the ring, so it is odd
+	// while the ring changes.
 	generation atomic.Uint64
 
 	mtx sync.Mutex
@@ -49,9 +50,6 @@ func (d *ringOwnershipDelegate) OnRingInstanceHeartbeat(_ *ring.Lifecycler, ring
 	// Callbacks can overlap, so the ring and the record are updated together.
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
-	// Update the ring before bumping the generation, so a refresh that reads
-	// the new generation computes from the new ring.
-	r.UpdateDesc(ringDesc)
 
 	// Heartbeats and state changes other than READONLY change no hash.
 	var h instanceHasher
@@ -59,10 +57,16 @@ func (d *ringOwnershipDelegate) OnRingInstanceHeartbeat(_ *ring.Lifecycler, ring
 	for id, instance := range ringDesc.Ingesters {
 		instances[id] = h.hash(instance)
 	}
-	if d.instances == nil || !maps.Equal(d.instances, instances) {
-		d.instances = instances
-		d.generation.Inc()
+	if d.instances != nil && maps.Equal(d.instances, instances) {
+		r.UpdateDesc(ringDesc)
+		return
 	}
+	// The generation is odd while the ring changes, so a refresh can tell
+	// whether it read one ring throughout.
+	d.generation.Inc()
+	r.UpdateDesc(ringDesc)
+	d.instances = instances
+	d.generation.Inc()
 }
 
 // instanceHasher hashes what shuffle-shard picks and zonal ownership read of
@@ -126,7 +130,8 @@ type ownershipRefresher struct {
 	computations           prometheus.Counter
 
 	// generation returns a value that changes whenever the ring changes in a
-	// way that can move a shuffle-shard pick or a share.
+	// way that can move a shuffle-shard pick or a share, and is odd while it
+	// changes.
 	generation func() uint64
 
 	// Only touched by refresh.
@@ -139,8 +144,8 @@ type tenantShare struct {
 	fingerprint uint64
 	share       float64
 	zones       int
-	// Computed while tokens were shared across zones, or from a whole ring
-	// that changed during the computation: recompute after the next change.
+	// Computed while tokens were shared or while the ring changed: recompute
+	// after the next change.
 	unsure bool
 }
 
@@ -183,8 +188,8 @@ func (o *ownershipRefresher) refreshContext(ctx context.Context, userIDs []strin
 	generation := o.generation()
 	ringChanged := generation != o.lastGeneration
 	o.lastGeneration = generation
-	// A token shared by two zones lets an instance outside a tenant's subring
-	// decide this zone's ownership, which the fingerprint does not cover.
+	// A token shared by two instances lets one outside a tenant's subring
+	// decide its ownership, which the fingerprint does not cover.
 	duplicates := o.ring.HasDuplicateTokens()
 
 	w := wholeRingMemo{o: o}
@@ -207,7 +212,10 @@ func (o *ownershipRefresher) refreshContext(ctx context.Context, userIDs []strin
 			tenants[userID] = prev // The tenant's subring is as before.
 			continue
 		}
-		t := w.compute(sub, fingerprint, duplicates)
+		t := w.compute(sub, fingerprint)
+		// Sure only if no token is shared and the ring did not change from the
+		// start of the refresh until now.
+		t.unsure = duplicates || generation%2 == 1 || o.generation() != generation
 		t.shardSize = size
 		tenants[userID] = t
 	}
@@ -264,20 +272,16 @@ func (w *wholeRingMemo) fingerprintOf(sub ring.ReadRing) uint64 {
 	return *w.fingerprint
 }
 
-// compute returns the share of sub. A subring is an immutable snapshot, but
-// the whole ring is the live ring, which a heartbeat can change while it is
-// read: if its fingerprint moved, the share is marked unsure.
-func (w *wholeRingMemo) compute(sub ring.ReadRing, fingerprint uint64, duplicates bool) tenantShare {
+// compute returns the share of sub.
+func (w *wholeRingMemo) compute(sub ring.ReadRing, fingerprint uint64) tenantShare {
 	if !w.isWholeRing(sub) {
 		t := w.o.computeShare(sub)
 		t.fingerprint = fingerprint
-		t.unsure = duplicates
 		return t
 	}
 	if w.share == nil {
 		t := w.o.computeShare(sub)
 		t.fingerprint = fingerprint
-		t.unsure = duplicates || subringFingerprint(sub) != fingerprint
 		w.share = &t
 	}
 	return *w.share

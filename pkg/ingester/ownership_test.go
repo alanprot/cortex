@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -401,13 +402,13 @@ func TestRingOwnershipDelegate_Generation(t *testing.T) {
 				tc.prepare(desc)
 			}
 			d.OnRingInstanceHeartbeat(nil, desc)
-			require.Equal(t, uint64(1), d.generation.Load(), "the first ring is a change")
+			require.Equal(t, uint64(2), d.generation.Load(), "the first ring is a change")
 
 			next := cloneOwnershipTestDesc(desc)
 			tc.change(next)
 			d.OnRingInstanceHeartbeat(nil, next)
 
-			assert.Equal(t, tc.bumped, d.generation.Load() != 1)
+			assert.Equal(t, tc.bumped, d.generation.Load() != 2)
 		})
 	}
 }
@@ -1008,18 +1009,7 @@ func TestOwnershipRefresher_WholeRingChangedDuringARefreshAndBack(t *testing.T) 
 	overrides := validation.NewOverrides(validation.Limits{}, limits)
 	tenants := []string{first, second}
 
-	// A neighbour whose READONLY flip moves the whole-ring share.
-	baseline := freshOwnershipShares(t, desc, me, overrides, tenants)[first].share
-	readOnly := cloneOwnershipTestDesc(desc)
-	for i := 1; i < layout.perZone; i++ {
-		candidate := cloneOwnershipTestDesc(desc)
-		setOwnershipTestState(ownershipTestInstanceID(0, i), ring.READONLY)(candidate)
-		if freshOwnershipShares(t, candidate, me, overrides, tenants)[first].share != baseline {
-			readOnly = candidate
-			break
-		}
-	}
-	require.NotEqual(t, baseline, freshOwnershipShares(t, readOnly, me, overrides, tenants)[first].share)
+	readOnly := readOnlyNeighbour(t, desc, me, layout.perZone, overrides, first)
 
 	d, r := newOwnershipTestDelegate(t, me, layout.zones)
 	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
@@ -1164,18 +1154,7 @@ func TestOwnershipRefresher_StoppedRefreshChangesNothing(t *testing.T) {
 	tenants := []string{tenant}
 	overrides := validation.NewOverrides(validation.Limits{}, nil)
 
-	// A neighbour whose READONLY flip moves the whole-ring share.
-	baseline := freshOwnershipShares(t, desc, me, overrides, tenants)[tenant].share
-	changed := cloneOwnershipTestDesc(desc)
-	for i := 1; i < layout.perZone; i++ {
-		candidate := cloneOwnershipTestDesc(desc)
-		setOwnershipTestState(ownershipTestInstanceID(0, i), ring.READONLY)(candidate)
-		if freshOwnershipShares(t, candidate, me, overrides, tenants)[tenant].share != baseline {
-			changed = candidate
-			break
-		}
-	}
-	require.NotEqual(t, baseline, freshOwnershipShares(t, changed, me, overrides, tenants)[tenant].share)
+	changed := readOnlyNeighbour(t, desc, me, layout.perZone, overrides, tenant)
 
 	d, r := newOwnershipTestDelegate(t, me, layout.zones)
 	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
@@ -1191,4 +1170,96 @@ func TestOwnershipRefresher_StoppedRefreshChangesNothing(t *testing.T) {
 
 	refresher.refresh(tenants)
 	assert.Equal(t, freshOwnershipShares(t, changed, me, overrides, tenants), comparableShares(refresher.tenants))
+}
+
+// A token becomes shared during a refresh, after it read HasDuplicateTokens,
+// and stops being shared before the next one, which must not reuse the share.
+func TestOwnershipRefresher_TokenSharedDuringARefresh(t *testing.T) {
+	const (
+		tenant = "tenant-1"
+		token  = uint32(1036751706)
+	)
+	me := ownershipTestInstanceID(0, 0)
+	collider := ownershipTestInstanceID(1, 1)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 6, tokensPerInstance: 8}
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	require.Contains(t, desc.Ingesters[me].Tokens, token)
+	// The collider, outside the tenant's shard, takes one of my tokens.
+	shared := cloneOwnershipTestDesc(desc)
+	in := shared.Ingesters[collider]
+	in.Tokens = append(slices.Clone(in.Tokens), token)
+	slices.Sort(in.Tokens)
+	shared.Ingesters[collider] = in
+
+	limits := &hookedTenantLimits{}
+	limits.limits = map[string]*validation.Limits{tenant: {IngestionTenantShardSize: 6}}
+	overrides := validation.NewOverrides(validation.Limits{}, limits)
+	require.NotEqual(t, freshOwnershipShares(t, desc, me, overrides, []string{tenant}), freshOwnershipShares(t, shared, me, overrides, []string{tenant}))
+
+	d, r := newOwnershipTestDelegate(t, me, layout.zones)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher := newOwnershipRefresher(r, me, true, overrides, nil, d.generation.Load)
+	refresher.refresh(nil)
+	limits.arm(tenant, func() { d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(shared)) })
+	refresher.refresh([]string{tenant})
+
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher.refresh([]string{tenant})
+	assert.Equal(t, freshOwnershipShares(t, desc, me, overrides, []string{tenant}), comparableShares(refresher.tenants))
+}
+
+// readOnlyNeighbour returns desc with a zone-0 neighbour of me made READONLY,
+// one whose change moves me's share of tenant.
+func readOnlyNeighbour(t *testing.T, desc *ring.Desc, me string, perZone int, overrides *validation.Overrides, tenant string) *ring.Desc {
+	t.Helper()
+	baseline := freshOwnershipShares(t, desc, me, overrides, []string{tenant})[tenant].share
+	for i := 1; i < perZone; i++ {
+		changed := cloneOwnershipTestDesc(desc)
+		setOwnershipTestState(ownershipTestInstanceID(0, i), ring.READONLY)(changed)
+		if freshOwnershipShares(t, changed, me, overrides, []string{tenant})[tenant].share != baseline {
+			return changed
+		}
+	}
+	t.Fatal("no neighbour moves the share")
+	return nil
+}
+
+// hookedCounter runs hook once before counting, standing in for a heartbeat
+// that lands while a share is computed.
+type hookedCounter struct {
+	prometheus.Counter
+	hook func()
+}
+
+func (c *hookedCounter) Inc() {
+	if hook := c.hook; hook != nil {
+		c.hook = nil
+		hook()
+	}
+	c.Counter.Inc()
+}
+
+// A heartbeat lands while the whole ring's share is computed, after its
+// fingerprint was read, and is undone before the next refresh. The share, from
+// the changed ring, must not be reused with the fingerprint of the old one.
+func TestOwnershipRefresher_WholeRingChangesDuringItsComputation(t *testing.T) {
+	const tenant = "whole"
+	me := ownershipTestInstanceID(0, 0)
+	layout := ownershipTestRingLayout{zones: 3, perZone: 4, tokensPerInstance: 16}
+	desc := newOwnershipTestDesc(rand.New(rand.NewSource(ownershipTestSeed)), layout)
+	overrides := validation.NewOverrides(validation.Limits{}, nil)
+	changed := readOnlyNeighbour(t, desc, me, layout.perZone, overrides, tenant)
+
+	d, r := newOwnershipTestDelegate(t, me, layout.zones)
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher := newOwnershipRefresher(r, me, true, overrides, nil, d.generation.Load)
+	refresher.computations = &hookedCounter{
+		Counter: refresher.computations,
+		hook:    func() { d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(changed)) },
+	}
+	refresher.refresh([]string{tenant})
+
+	d.OnRingInstanceHeartbeat(nil, cloneOwnershipTestDesc(desc))
+	refresher.refresh([]string{tenant})
+	assert.Equal(t, freshOwnershipShares(t, desc, me, overrides, []string{tenant}), comparableShares(refresher.tenants))
 }
