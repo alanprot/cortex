@@ -64,51 +64,53 @@ func (r *Ring) HasDuplicateTokens() bool {
 // The returned map is cached until the ring's tokens change or an instance
 // becomes or stops being READONLY, and must not be modified.
 func (r *Ring) ZonalOwnership() map[string]float64 {
+	ownership, _ := r.zonalOwnershipAndRanges()
+	return ownership
+}
+
+// ZonalOwnedRanges returns the [prev, token) ranges instanceID owns within its
+// zone, by the same rules as ZonalOwnership. Cached with it; do not modify.
+func (r *Ring) ZonalOwnedRanges(instanceID string) []TokenRange {
+	_, ranges := r.zonalOwnershipAndRanges()
+	return ranges[instanceID]
+}
+
+// zonalOwnershipAndRanges computes shares and ranges in one walk, cached until
+// the ring's tokens or READONLY states change.
+func (r *Ring) zonalOwnershipAndRanges() (map[string]float64, map[string][]TokenRange) {
 	r.mtx.RLock()
-	cached := r.zonalOwnership
+	ownership, ranges := r.zonalOwnership, r.zonalOwnedRanges
 	r.mtx.RUnlock()
-	if cached != nil {
-		return cached
+	if ownership != nil {
+		return ownership, ranges
 	}
 
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	if r.zonalOwnership == nil {
-		r.zonalOwnership = r.computeZonalOwnership()
+		r.zonalOwnership, r.zonalOwnedRanges = r.computeZonalOwnership()
 	}
-	return r.zonalOwnership
+	return r.zonalOwnership, r.zonalOwnedRanges
 }
 
 // invalidateZonalOwnership drops the cached ownership. The caller must hold
 // r.mtx for writing.
 func (r *Ring) invalidateZonalOwnership() {
-	r.zonalOwnership = nil
+	r.zonalOwnership, r.zonalOwnedRanges = nil, nil
 }
 
 // computeZonalOwnership must be called with r.mtx held.
-func (r *Ring) computeZonalOwnership() map[string]float64 {
+func (r *Ring) computeZonalOwnership() (map[string]float64, map[string][]TokenRange) {
 	ownership := make(map[string]float64, len(r.ringDesc.Ingesters))
+	ranges := make(map[string][]TokenRange, len(r.ringDesc.Ingesters))
 	for id := range r.ringDesc.Ingesters {
 		ownership[id] = 0
 	}
-	r.walkZonalOwnership(func(id string, _, _ uint32, size int64) {
+	r.walkZonalOwnership(func(id string, prev, token uint32, size int64) {
 		ownership[id] += float64(size) / ringHashSpaceSize
+		ranges[id] = append(ranges[id], TokenRange{Start: prev, End: token})
 	})
-	return ownership
-}
-
-// ZonalOwnedRanges returns the ranges of keys instanceID owns within its zone,
-// from the same walk as ZonalOwnership, so their sizes sum to its share.
-func (r *Ring) ZonalOwnedRanges(instanceID string) []TokenRange {
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
-	var ranges []TokenRange
-	r.walkZonalOwnership(func(id string, prev, token uint32, _ int64) {
-		if id == instanceID {
-			ranges = append(ranges, TokenRange{Start: prev, End: token})
-		}
-	})
-	return ranges
+	return ownership, ranges
 }
 
 // walkZonalOwnership calls fn for every non-empty range an instance owns

@@ -211,6 +211,8 @@ type Ring struct {
 	// Cached result of ZonalOwnership. Nil when not computed, or after a change
 	// of tokens or of which instances are READONLY. Guarded by mtx.
 	zonalOwnership map[string]float64
+	// Each instance's owned ranges, from the same walk as zonalOwnership.
+	zonalOwnedRanges map[string][]TokenRange
 
 	memberOwnershipGaugeVec      *prometheus.GaugeVec
 	memberZonalOwnershipGaugeVec *prometheus.GaugeVec
