@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
+	github.com/RoaringBitmap/roaring/v2 v2.30.0
 	github.com/VictoriaMetrics/fastcache v1.13.3
 	github.com/alecthomas/units v0.0.0-20240927000941-0f3dac36c52b
 	github.com/alicebob/miniredis/v2 v2.38.0
@@ -138,6 +139,7 @@ require (
 	github.com/aws/smithy-go v1.27.5 // indirect
 	github.com/baidubce/bce-sdk-go v0.9.230 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/caio/go-tdigest v3.1.0+incompatible // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -237,6 +239,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/mozillazg/go-httpheader v0.4.0 // indirect
+	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f // indirect
 	github.com/ncw/swift v1.0.53 // indirect
 	github.com/oklog/run v1.2.0 // indirect

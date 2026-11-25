@@ -427,3 +427,93 @@ func TestRing_ShuffleShardReturnsTheRingItselfWhenItCoversTheRing(t *testing.T) 
 	}
 	assert.NotSame(t, r, r.ShuffleShard("tenant", instances-1))
 }
+
+// withDuplicateTokens gives some instances a token of another instance in the
+// same zone, and some a token of an instance in another zone.
+func withDuplicateTokens(rnd *rand.Rand, instances []ownershipTestInstance) {
+	for i := range instances {
+		j := rnd.Intn(len(instances))
+		if i == j {
+			continue
+		}
+		instances[i].tokens = append(instances[i].tokens, instances[j].tokens[0])
+	}
+}
+
+func inTokenRange(rg TokenRange, key uint32) bool {
+	if rg.Start < rg.End {
+		return key >= rg.Start && key < rg.End
+	}
+	return key >= rg.Start || key < rg.End
+}
+
+func TestRing_ZonalOwnedRanges_MatchOwnershipAndRouting(t *testing.T) {
+	const (
+		zones             = 3
+		perZone           = 6
+		tokensPerInstance = 16
+		rounds            = 5
+	)
+	rnd := rand.New(rand.NewSource(ownershipTestSeed))
+	for round := range rounds {
+		instances := randomOwnershipInstances(rnd, zones, perZone, tokensPerInstance, joiningAndReadOnly)
+		if round%2 == 1 {
+			withDuplicateTokens(rnd, instances)
+		}
+		r := newOwnershipTestRing(t, zones, newOwnershipTestDesc(instances))
+		ownership := r.ZonalOwnership()
+
+		ranges := map[string][]TokenRange{}
+		for _, inst := range instances {
+			ranges[inst.id] = r.ZonalOwnedRanges(inst.id)
+			var size int64
+			for _, rg := range ranges[inst.id] {
+				size += tokenDistance(rg.Start, rg.End)
+			}
+			assert.InDelta(t, ownership[inst.id], float64(size)/ringHashSpaceSize, ownershipTolerance, "round %d instance %s", round, inst.id)
+		}
+
+		// Every key Get sends to an instance is in its ranges, tokens included.
+		idByAddr := map[string]string{}
+		var keys []uint32
+		for _, inst := range instances {
+			idByAddr[inst.id+"-addr"] = inst.id
+			for _, tok := range inst.tokens {
+				keys = append(keys, tok, tok-1, tok+1)
+			}
+		}
+		for range routingSampleKeys / 10 {
+			keys = append(keys, rnd.Uint32())
+		}
+		bufDescs, bufHosts, bufZones := MakeBuffersForGet()
+		for _, key := range keys {
+			set, err := r.Get(key, WriteNoExtend, bufDescs, bufHosts, bufZones)
+			require.NoError(t, err)
+			for _, ing := range set.Instances {
+				id := idByAddr[ing.Addr]
+				found := false
+				for _, rg := range ranges[id] {
+					if inTokenRange(rg, key) {
+						found = true
+						break
+					}
+				}
+				require.True(t, found, "round %d: key %d routed to %s outside its ranges", round, key, id)
+			}
+		}
+	}
+}
+
+func TestRing_ZonalOwnedRanges_Subring(t *testing.T) {
+	rnd := rand.New(rand.NewSource(ownershipTestSeed))
+	instances := randomOwnershipInstances(rnd, 3, 10, 32, joiningAndReadOnly)
+	r := newOwnershipTestRing(t, 3, newOwnershipTestDesc(instances))
+	sub := r.ShuffleShard("tenant", 6).(ZonalOwnershipRing)
+	for id, share := range sub.ZonalOwnership() {
+		var size int64
+		for _, rg := range sub.ZonalOwnedRanges(id) {
+			size += tokenDistance(rg.Start, rg.End)
+		}
+		assert.InDelta(t, share, float64(size)/ringHashSpaceSize, ownershipTolerance, id)
+	}
+}

@@ -156,6 +156,7 @@ type Config struct {
 	DistributorShardByAllLabels bool   `yaml:"-"`
 
 	UseRingOwnershipForLimits bool `yaml:"use_ring_ownership_for_limits"`
+	OwnedSeriesLimitEnabled   bool `yaml:"owned_series_limit_enabled"`
 
 	DefaultLimits    InstanceLimits         `yaml:"instance_limits"`
 	InstanceLimitsFn func() *InstanceLimits `yaml:"-"`
@@ -224,6 +225,8 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.BoolVar(&cfg.LabelsStringInterningEnabled, "ingester.labels-string-interning-enabled", false, "Experimental: Enable string interning for metrics labels.")
 	f.BoolVar(&cfg.UseRingOwnershipForLimits, "ingester.use-ring-ownership-for-limits", false, "Experimental: Convert global series and metadata limits to local ones using the share of each tenant's hash space this ingester owns within its zone, instead of assuming every ingester owns an equal share. Requires zone-aware replication. While the number of zones in the ring differs from the replication factor, the equal-share conversion is used. Applies only to the limits that are divided across ingesters.")
 
+	f.BoolVar(&cfg.OwnedSeriesLimitEnabled, "ingester.owned-series-limit-enabled", false, "Experimental: Check the per-user series limit against the head series whose tokens are in the ranges this ingester owns, instead of every head series, so series that moved to other ingesters stop counting before head compaction removes them. Only effective with -ingester.use-ring-ownership-for-limits and -distributor.shard-by-all-labels.")
+
 	f.BoolVar(&cfg.DisableChunkTrimming, "ingester.disable-chunk-trimming", false, "Disable trimming of matching series chunks based on query Start and End time. When disabled, the result may contain samples outside the queried time range but select performances may be improved. Note that certain query results might change by changing this option.")
 	f.IntVar(&cfg.MatchersCacheMaxItems, "ingester.matchers-cache-max-items", 0, "Maximum number of entries in the regex matchers cache. 0 to disable.")
 	f.BoolVar(&cfg.SkipMetadataLimits, "ingester.skip-metadata-limits", true, "If enabled, the metadata API returns all metadata regardless of the limits.")
@@ -247,6 +250,9 @@ func (cfg *Config) Validate(monitoredResources flagext.StringSliceCSV) error {
 			return errRingOwnershipRequiresZoneAwareness
 		}
 		logutil.WarnExperimentalUse("Ring ownership for limits")
+		if cfg.OwnedSeriesLimitEnabled {
+			logutil.WarnExperimentalUse("Owned series limit")
+		}
 	}
 
 	if err := cfg.QueryProtection.Validate(monitoredResources); err != nil {
@@ -439,6 +445,9 @@ type userTSDB struct {
 
 	// Tracks active series per configured tracker pattern.
 	trackerCounter *trackerCounter
+
+	// Tracks series tokens to count owned series; nil when disabled.
+	ownedSeries *ownedSeriesTracker
 }
 
 // Explicitly wrapping the tsdb.DB functions that we use.
@@ -548,7 +557,11 @@ func (u *userTSDB) PreCreation(metric labels.Labels) error {
 	}
 
 	// Total series limit.
-	if err := u.limiter.AssertMaxSeriesPerUser(u.userID, int(u.Head().NumSeries())); err != nil {
+	numSeries := int64(u.Head().NumSeries())
+	if u.ownedSeries != nil {
+		numSeries = max(0, numSeries-u.ownedSeries.notOwned.Load())
+	}
+	if err := u.limiter.AssertMaxSeriesPerUser(u.userID, int(numSeries)); err != nil {
 		return err
 	}
 
@@ -580,6 +593,9 @@ func (u *userTSDB) PreCreation(metric labels.Labels) error {
 // PostCreation implements SeriesLifecycleCallback interface.
 func (u *userTSDB) PostCreation(metric labels.Labels) {
 	u.instanceSeriesCount.Inc()
+	if u.ownedSeries != nil {
+		u.ownedSeries.add(client.ShardByAllLabels(u.userID, metric))
+	}
 
 	metricName, err := extract.MetricNameFromLabels(metric)
 	if err != nil {
@@ -602,6 +618,9 @@ func (u *userTSDB) PostDeletion(metrics map[chunks.HeadSeriesRef]labels.Labels) 
 	u.instanceSeriesCount.Sub(int64(len(metrics)))
 
 	for _, metric := range metrics {
+		if u.ownedSeries != nil {
+			u.ownedSeries.remove(client.ShardByAllLabels(u.userID, metric))
+		}
 		metricName, err := extract.MetricNameFromLabels(metric)
 		if err != nil {
 			// This should never happen because it has already been checked in PreCreation().
@@ -925,6 +944,9 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 		}
 		i.ownershipRefresher = newOwnershipRefresher(ownershipDelegate.latest, newRing, i.lifecycler.ID, i.limiter.shuffleShardingEnabled, limits, registerer)
 		i.limiter.ownership = i.ownershipRefresher.ownership
+		if i.ownedSeriesTrackingEnabled() {
+			i.ownershipRefresher.setOwnedRanges = i.setOwnedRanges
+		}
 	}
 
 	i.TSDBState.shipperIngesterID = i.lifecycler.ID
@@ -3121,6 +3143,9 @@ func (i *Ingester) createTSDB(userID string) (*userTSDB, error) {
 
 		blockRetentionPeriod: i.cfg.BlocksStorageConfig.TSDB.Retention.Milliseconds(),
 		postingCache:         postingCache,
+	}
+	if i.ownedSeriesTrackingEnabled() {
+		userDB.ownedSeries = newOwnedSeriesTracker()
 	}
 
 	enableExemplars := false

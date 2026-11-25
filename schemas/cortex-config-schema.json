@@ -5471,6 +5471,12 @@
           "x-cli-flag": "ingester.metadata-retain-period",
           "x-format": "duration"
         },
+        "owned_series_limit_enabled": {
+          "default": false,
+          "description": "Experimental: Check the per-user series limit against the head series whose tokens are in the ranges this ingester owns, instead of every head series, so series that moved to other ingesters stop counting before head compaction removes them. Only effective with -ingester.use-ring-ownership-for-limits and -distributor.shard-by-all-labels.",
+          "type": "boolean",
+          "x-cli-flag": "ingester.owned-series-limit-enabled"
+        },
         "query_protection": {
           "properties": {
             "eviction": {
