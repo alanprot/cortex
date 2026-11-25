@@ -21,54 +21,85 @@ type tokenInterval struct {
 	start, end uint64
 }
 
+const (
+	// ownedStripeBits stripes the tracker by the token's top bits, so hooks
+	// on different stripes don't contend.
+	ownedStripeBits  = 4
+	ownedStripeCount = 1 << ownedStripeBits
+	ownedStripeShift = 32 - ownedStripeBits
+)
+
 // ownedSeriesTracker tracks the tokens of a tenant's head series, to count
 // those in the ranges this ingester owns.
 type ownedSeriesTracker struct {
-	mtx    sync.Mutex
-	tokens *roaring.Bitmap
-	// Series beyond the first with the same token.
-	extra map[uint32]uint16
-	total int64
+	stripes [ownedStripeCount]ownedSeriesStripe
 
-	// Sorted, disjoint owned intervals; only meaningful when known.
+	// rangesMtx serializes setRanges and clearRanges.
+	rangesMtx  sync.Mutex
 	known      bool
 	intervals  []tokenInterval
 	rangesHash uint64
 
-	// Tracked series outside the owned intervals; 0 while not known.
+	// Sum of the stripes' notOwned; read lock-free by PreCreation.
 	notOwned atomic.Int64
 }
 
+type ownedSeriesStripe struct {
+	mtx    sync.Mutex
+	tokens *roaring.Bitmap
+	// Series beyond the first with the same token.
+	extra map[uint32]uint32
+	total int64
+
+	// Shared, read-only owned intervals; only meaningful when known.
+	known     bool
+	intervals []tokenInterval
+	notOwned  int64
+}
+
 func newOwnedSeriesTracker() *ownedSeriesTracker {
-	return &ownedSeriesTracker{tokens: roaring.New(), extra: map[uint32]uint16{}}
+	t := &ownedSeriesTracker{}
+	for i := range t.stripes {
+		t.stripes[i].tokens = roaring.New()
+		t.stripes[i].extra = map[uint32]uint32{}
+	}
+	return t
+}
+
+func (t *ownedSeriesTracker) stripe(token uint32) *ownedSeriesStripe {
+	return &t.stripes[token>>ownedStripeShift]
 }
 
 func (t *ownedSeriesTracker) add(token uint32) {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
-	if !t.tokens.CheckedAdd(token) {
-		t.extra[token]++
+	s := t.stripe(token)
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if !s.tokens.CheckedAdd(token) {
+		s.extra[token]++
 	}
-	t.total++
-	if t.known && !t.ownsLocked(token) {
+	s.total++
+	if s.known && !ownsToken(s.intervals, token) {
+		s.notOwned++
 		t.notOwned.Inc()
 	}
 }
 
 func (t *ownedSeriesTracker) remove(token uint32) {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
-	if c, ok := t.extra[token]; ok {
+	s := t.stripe(token)
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	if c, ok := s.extra[token]; ok {
 		if c == 1 {
-			delete(t.extra, token)
+			delete(s.extra, token)
 		} else {
-			t.extra[token] = c - 1
+			s.extra[token] = c - 1
 		}
-	} else if !t.tokens.CheckedRemove(token) {
+	} else if !s.tokens.CheckedRemove(token) {
 		return // Not tracked.
 	}
-	t.total--
-	if t.known && !t.ownsLocked(token) {
+	s.total--
+	if s.known && !ownsToken(s.intervals, token) {
+		s.notOwned--
 		t.notOwned.Dec()
 	}
 }
@@ -78,47 +109,72 @@ func (t *ownedSeriesTracker) setRanges(ranges []ring.TokenRange) {
 	intervals := toIntervals(ranges)
 	hash := hashIntervals(intervals)
 
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
+	t.rangesMtx.Lock()
+	defer t.rangesMtx.Unlock()
 	if t.known && t.rangesHash == hash {
 		return
 	}
 	t.known, t.intervals, t.rangesHash = true, intervals, hash
 
-	// Intersecting with run containers beats one Rank per bound, which walks containers.
+	// Built outside the stripe locks; intersecting with run containers beats
+	// one Rank per bound, which walks containers.
 	ownedTokens := roaring.New()
 	for _, iv := range intervals {
 		ownedTokens.AddRange(iv.start, iv.end)
 	}
-	owned := int64(t.tokens.AndCardinality(ownedTokens))
-	for token, c := range t.extra {
-		if t.ownsLocked(token) {
-			owned += int64(c)
+	for i := range t.stripes {
+		s := &t.stripes[i]
+		s.mtx.Lock()
+		owned := int64(s.tokens.AndCardinality(ownedTokens))
+		for token, c := range s.extra {
+			if ownsToken(intervals, token) {
+				owned += int64(c)
+			}
 		}
+		notOwned := s.total - owned
+		t.notOwned.Add(notOwned - s.notOwned)
+		s.known, s.intervals, s.notOwned = true, intervals, notOwned
+		s.mtx.Unlock()
 	}
-	t.notOwned.Store(t.total - owned)
 }
 
 // clearRanges falls back to counting every tracked series as owned.
 func (t *ownedSeriesTracker) clearRanges() {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
+	t.rangesMtx.Lock()
+	defer t.rangesMtx.Unlock()
 	t.known, t.intervals, t.rangesHash = false, nil, 0
-	t.notOwned.Store(0)
+	for i := range t.stripes {
+		s := &t.stripes[i]
+		s.mtx.Lock()
+		t.notOwned.Sub(s.notOwned)
+		s.known, s.intervals, s.notOwned = false, nil, 0
+		s.mtx.Unlock()
+	}
+}
+
+// totals returns tracked and not-owned series, consistent per stripe.
+func (t *ownedSeriesTracker) totals() (total, notOwned int64) {
+	for i := range t.stripes {
+		s := &t.stripes[i]
+		s.mtx.Lock()
+		total += s.total
+		notOwned += s.notOwned
+		s.mtx.Unlock()
+	}
+	return total, notOwned
 }
 
 // owned returns the number of tracked series in the owned ranges.
 func (t *ownedSeriesTracker) owned() int64 {
-	t.mtx.Lock()
-	defer t.mtx.Unlock()
-	return t.total - t.notOwned.Load()
+	total, notOwned := t.totals()
+	return total - notOwned
 }
 
-// ownsLocked reports whether token is in the owned intervals. Caller holds t.mtx.
-func (t *ownedSeriesTracker) ownsLocked(token uint32) bool {
+// ownsToken reports whether token is in the sorted intervals.
+func ownsToken(intervals []tokenInterval, token uint32) bool {
 	k := uint64(token)
-	i := sort.Search(len(t.intervals), func(i int) bool { return t.intervals[i].end > k })
-	return i < len(t.intervals) && t.intervals[i].start <= k
+	i := sort.Search(len(intervals), func(i int) bool { return intervals[i].end > k })
+	return i < len(intervals) && intervals[i].start <= k
 }
 
 // toIntervals splits wrapping ranges and merges adjacent ones.

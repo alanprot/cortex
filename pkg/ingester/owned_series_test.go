@@ -163,9 +163,9 @@ func TestOwnedSeries_WALReplayRestoresTracker(t *testing.T) {
 	db, err = i.getOrCreateTSDB(tenant, true)
 	require.NoError(t, err)
 	require.Equal(t, uint64(ownedTestSeries), db.Head().NumSeries())
-	assert.Equal(t, int64(ownedTestSeries), db.ownedSeries.total)
+	assert.Equal(t, int64(ownedTestSeries), db.ownedSeries.total())
 	for n := range ownedTestSeries {
-		assert.True(t, db.ownedSeries.tokens.Contains(client.ShardByAllLabels(tenant, ownedTestSeriesLabels(n))))
+		assert.True(t, db.ownedSeries.contains(client.ShardByAllLabels(tenant, ownedTestSeriesLabels(n))))
 	}
 }
 
@@ -190,13 +190,13 @@ func TestOwnedSeriesTracker_TokenCollision(t *testing.T) {
 
 	tr.remove(token)
 	assert.Equal(t, int64(1), tr.owned())
-	assert.True(t, tr.tokens.Contains(token), "one series still has the token")
+	assert.True(t, tr.contains(token), "one series still has the token")
 	tr.remove(token)
 	assert.Equal(t, int64(0), tr.owned())
-	assert.False(t, tr.tokens.Contains(token))
+	assert.False(t, tr.contains(token))
 	tr.remove(token) // Untracked: no-op.
 	tr.remove(other)
-	assert.Equal(t, int64(0), tr.total)
+	assert.Equal(t, int64(0), tr.total())
 	assert.Zero(t, tr.notOwned.Load())
 }
 
@@ -288,7 +288,7 @@ func TestOwnedSeriesTracker_ConcurrentHooksAndRecount(t *testing.T) {
 	close(stopped)
 	recounts.Wait()
 
-	final := tr.intervals
+	final := tr.currentIntervals()
 	want := 0
 	for _, tok := range live {
 		for _, iv := range final {
@@ -298,18 +298,25 @@ func TestOwnedSeriesTracker_ConcurrentHooksAndRecount(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, int64(len(live)), tr.total)
+	assert.Equal(t, int64(len(live)), tr.total())
 	assert.Equal(t, int64(want), tr.owned())
 }
 
 const (
-	ownedBenchSeries  = 1_000_000
 	ownedBenchTenant  = "tenant"
 	ownedBenchPerZone = 30
 	ownedBenchTokens  = 128
 )
 
+var ownedBenchSeriesCounts = []int{1_000_000, 10_000_000}
+
 func BenchmarkOwnedSeries(b *testing.B) {
+	for _, n := range ownedBenchSeriesCounts {
+		b.Run(fmt.Sprintf("series=%d", n), func(b *testing.B) { benchmarkOwnedSeries(b, n) })
+	}
+}
+
+func benchmarkOwnedSeries(b *testing.B, ownedBenchSeries int) {
 	lbls := make([]labels.Labels, ownedBenchSeries)
 	for n := range lbls {
 		lbls[n] = labels.FromStrings(labels.MetricName, "metric", "pod", fmt.Sprintf("pod-%d", n%1000), "series", fmt.Sprint(n))
@@ -339,7 +346,7 @@ func BenchmarkOwnedSeries(b *testing.B) {
 		}
 	})
 
-	// Head churn at 1M series: one series deleted and one created per op.
+	// Head churn at a full head: one series deleted and one created per op.
 	b.Run("hook-steady", func(b *testing.B) {
 		tr := newOwnedSeriesTracker()
 		tr.setRanges(ownedBenchRanges(b)[0])
@@ -365,10 +372,11 @@ func BenchmarkOwnedSeries(b *testing.B) {
 			}
 			runtime.GC()
 			runtime.ReadMemStats(&after)
-			b.ReportMetric(float64(tr.tokens.GetSizeInBytes()), "bitmap-bytes")
+			bytes, containers, _, extra := tr.bitmapStats()
+			b.ReportMetric(float64(bytes), "bitmap-bytes")
 			b.ReportMetric(float64(after.HeapAlloc)-float64(before.HeapAlloc), "heap-delta-bytes")
-			b.ReportMetric(float64(len(tr.extra)), "collided-tokens")
-			b.ReportMetric(float64(tr.tokens.Stats().Containers), "containers")
+			b.ReportMetric(float64(extra), "collided-series")
+			b.ReportMetric(float64(containers), "containers")
 			runtime.KeepAlive(tr)
 		}
 	})
@@ -407,4 +415,40 @@ func ownedBenchRanges(b *testing.B) [][]ring.TokenRange {
 		}
 	}
 	return rangeSets
+}
+
+// Test helpers.
+
+func (t *ownedSeriesTracker) total() int64 {
+	total, _ := t.totals()
+	return total
+}
+
+func (t *ownedSeriesTracker) contains(token uint32) bool {
+	s := t.stripe(token)
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.tokens.Contains(token)
+}
+
+func (t *ownedSeriesTracker) currentIntervals() []tokenInterval {
+	t.rangesMtx.Lock()
+	defer t.rangesMtx.Unlock()
+	return t.intervals
+}
+
+// bitmapStats returns bitmap bytes, containers, distinct tokens and collided series.
+func (t *ownedSeriesTracker) bitmapStats() (bytes uint64, containers uint64, card int64, extra int64) {
+	for i := range t.stripes {
+		s := &t.stripes[i]
+		s.mtx.Lock()
+		bytes += s.tokens.GetSizeInBytes()
+		containers += s.tokens.Stats().Containers
+		card += int64(s.tokens.GetCardinality())
+		for _, c := range s.extra {
+			extra += int64(c)
+		}
+		s.mtx.Unlock()
+	}
+	return
 }
