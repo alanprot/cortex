@@ -24,7 +24,7 @@ type tokenInterval struct {
 const (
 	// ownedStripeBits stripes the tracker by the token's top bits, so hooks
 	// on different stripes don't contend.
-	ownedStripeBits  = 4
+	ownedStripeBits  = 9
 	ownedStripeCount = 1 << ownedStripeBits
 	ownedStripeShift = 32 - ownedStripeBits
 )
